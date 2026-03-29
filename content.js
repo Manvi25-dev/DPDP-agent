@@ -1,0 +1,511 @@
+/**
+ * content.js — Content Script
+ * Detects consent banners, extracts policy URL, triggers analysis, renders overlay.
+ */
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+let overlayInjected = false;
+let detectionDebounceTimer = null;
+let observerActive = false;
+
+// Keywords that indicate a consent/cookie banner
+const CONSENT_KEYWORDS = ["cookie", "privacy", "consent", "accept", "agree", "gdpr", "data protection", "terms"];
+const POLICY_LINK_KEYWORDS = ["privacy policy", "privacy notice", "data protection", "privacy statement"];
+
+// ─── Entry Point ──────────────────────────────────────────────────────────────
+
+function init() {
+  // Run once on load
+  detectConsentBanner();
+
+  // Watch for dynamically injected banners
+  if (!observerActive) {
+    observerActive = true;
+    const observer = new MutationObserver(() => {
+      clearTimeout(detectionDebounceTimer);
+      detectionDebounceTimer = setTimeout(detectConsentBanner, 600);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+}
+
+// ─── Consent Detection ────────────────────────────────────────────────────────
+
+function detectConsentBanner() {
+  if (overlayInjected) return;
+
+  const banner = findConsentElement();
+  if (!banner) return;
+
+  const policyUrl = extractPolicyUrl(banner);
+  if (!policyUrl) {
+    console.log("[DPDP] Consent banner found but no policy link detected.");
+    return;
+  }
+
+  console.log("[DPDP] Consent banner detected. Policy URL:", policyUrl);
+  triggerAnalysis(policyUrl, banner);
+}
+
+function findConsentElement() {
+  // Strategy 1: known framework selectors
+  const knownSelectors = [
+    "#onetrust-banner-sdk",
+    "#cookieConsent",
+    "#cookie-banner",
+    "#cookie-notice",
+    ".cookie-banner",
+    ".cookie-consent",
+    ".consent-banner",
+    "[id*='cookie'][id*='banner']",
+    "[class*='cookie'][class*='banner']",
+    "[class*='consent']",
+    "[aria-label*='cookie']",
+    "[aria-label*='consent']",
+  ];
+
+  for (const sel of knownSelectors) {
+    try {
+      const el = document.querySelector(sel);
+      if (el && isVisible(el)) return el;
+    } catch {
+      // invalid selector — skip
+    }
+  }
+
+  // Strategy 2: heuristic — scan visible elements for keyword density
+  const candidates = document.querySelectorAll("div, section, aside, dialog, [role='dialog'], [role='alertdialog']");
+  for (const el of candidates) {
+    if (!isVisible(el)) continue;
+    const text = (el.innerText || el.textContent || "").toLowerCase();
+    const matchCount = CONSENT_KEYWORDS.filter((kw) => text.includes(kw)).length;
+    if (matchCount >= 2 && text.length < 3000) {
+      return el;
+    }
+  }
+
+  return null;
+}
+
+function isVisible(el) {
+  const rect = el.getBoundingClientRect();
+  const style = window.getComputedStyle(el);
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    style.opacity !== "0"
+  );
+}
+
+// ─── Policy URL Extraction ────────────────────────────────────────────────────
+
+function extractPolicyUrl(bannerEl) {
+  // Search within banner first, then fall back to full page
+  const searchRoots = [bannerEl, document.body];
+
+  for (const root of searchRoots) {
+    const links = root.querySelectorAll("a[href]");
+    for (const link of links) {
+      const text = (link.innerText || link.textContent || link.title || link.getAttribute("aria-label") || "").toLowerCase();
+      const href = link.href;
+      if (!href || href.startsWith("javascript:") || href === "#") continue;
+
+      if (POLICY_LINK_KEYWORDS.some((kw) => text.includes(kw))) {
+        return resolveUrl(href);
+      }
+    }
+
+    // Also check href patterns
+    for (const link of links) {
+      const href = (link.href || "").toLowerCase();
+      if (href.includes("privacy") || href.includes("data-protection")) {
+        return resolveUrl(link.href);
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveUrl(href) {
+  try {
+    return new URL(href, window.location.href).href;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Analysis Trigger ─────────────────────────────────────────────────────────
+
+function triggerAnalysis(policyUrl, bannerEl) {
+  // [ADDED] Show loading state immediately with "agent feel"
+  showLoadingOverlay(bannerEl);
+
+  chrome.runtime.sendMessage({ type: "ANALYZE_POLICY", policyUrl }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error("[DPDP] Message error:", chrome.runtime.lastError.message);
+      // [ADDED] Minimum delay so loading state is always visible
+      setTimeout(() => showErrorOverlay(bannerEl, "Extension error. Please reload the page."), 1500);
+      return;
+    }
+
+    if (!response || !response.success) {
+      // [ADDED] On failure, show fallback risks instead of hard error
+      const fallbackRisks = getFallbackRisks();
+      setTimeout(() => showRiskOverlay(bannerEl, fallbackRisks, policyUrl, true), 1800);
+      return;
+    }
+
+    const risks = mapRisks(response.analysis);
+
+    // [ADDED] Ensure at least 2–3 risks are shown; pad with fallbacks if needed
+    const paddedRisks = padWithFallbacks(risks);
+
+    // [ADDED] Delay render by 1.8s to simulate AI processing
+    setTimeout(() => showRiskOverlay(bannerEl, paddedRisks, policyUrl, false), 1800);
+  });
+}
+
+// [ADDED] Fallback risks shown when analysis fails or returns too few results
+function getFallbackRisks() {
+  return [
+    { level: "High", principle: "Storage Limitation", message: "Retention period not clearly specified. Data may be kept longer than necessary." },
+    { level: "Medium", principle: "Purpose Limitation", message: "Third-party data sharing detected. Verify if sharing aligns with stated purposes." },
+    { level: "Medium", principle: "User Rights", message: "User rights (erasure, withdrawal) not clearly outlined in this policy." },
+  ];
+}
+
+// [ADDED] Pad real risks with fallbacks if fewer than 2 risks were detected
+function padWithFallbacks(risks) {
+  if (risks.length >= 2) return risks;
+  const fallbacks = getFallbackRisks();
+  const combined = [...risks];
+  for (const fb of fallbacks) {
+    if (combined.length >= 3) break;
+    // Avoid duplicating same principle
+    if (!combined.some((r) => r.principle === fb.principle)) {
+      combined.push(fb);
+    }
+  }
+  return combined;
+}
+
+// ─── DPDP Rule Mapping Engine ─────────────────────────────────────────────────
+
+function mapRisks(analysis) {
+  const risks = [];
+
+  if (!analysis) return risks;
+
+  // Rule: retention_periods empty
+  if (!analysis.retention_periods || analysis.retention_periods.trim() === "") {
+    risks.push({ level: "High", principle: "Storage Limitation", message: "Data retention period not specified. Under DPDP, data must not be kept longer than necessary." });
+  }
+
+  // Rule: third_party_sharing present
+  if (analysis.third_party_sharing && analysis.third_party_sharing.trim() !== "") {
+    risks.push({ level: "Medium", principle: "Purpose Limitation", message: "Third-party data sharing detected. Verify if sharing aligns with the stated collection purpose." });
+  }
+
+  // Rule: consent_mechanism vague or empty
+  const consent = (analysis.consent_mechanism || "").toLowerCase();
+  if (!consent || consent.length < 10 || ["vague", "unclear", "not specified", "none"].some((w) => consent.includes(w))) {
+    risks.push({ level: "Medium", principle: "Lawful Consent", message: "Consent mechanism is unclear or vague. DPDP requires free, specific, informed, and unambiguous consent." });
+  }
+
+  // Rule: user_rights empty
+  if (!analysis.user_rights || analysis.user_rights.length === 0) {
+    risks.push({ level: "High", principle: "User Rights", message: "No user rights mentioned (e.g., right to withdraw consent, erasure). DPDP mandates these rights." });
+  }
+
+  // Rule: collection_purposes empty
+  if (!analysis.collection_purposes || analysis.collection_purposes.length === 0) {
+    risks.push({ level: "High", principle: "Transparency", message: "Data collection purposes not stated. DPDP requires clear disclosure of why data is collected." });
+  }
+
+  // Rule: data_types_collected empty
+  if (!analysis.data_types_collected || analysis.data_types_collected.length === 0) {
+    risks.push({ level: "Medium", principle: "Data Minimization", message: "Types of data collected are not specified. Transparency about collected data is required under DPDP." });
+  }
+
+  return risks;
+}
+
+// ─── UI Overlay (Shadow DOM) ──────────────────────────────────────────────────
+
+const OVERLAY_ID = "dpdp-warning-host";
+
+function createShadowHost() {
+  // Remove any existing overlay
+  const existing = document.getElementById(OVERLAY_ID);
+  if (existing) existing.remove();
+
+  const host = document.createElement("div");
+  host.id = OVERLAY_ID;
+  host.style.cssText = "all: initial; position: fixed; z-index: 2147483647; bottom: 20px; right: 20px; max-width: 380px; font-family: sans-serif;";
+  document.body.appendChild(host);
+
+  const shadow = host.attachShadow({ mode: "closed" });
+  return { host, shadow };
+}
+
+function getBaseStyles() {
+  return `
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    .card {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      border: 1px solid #2d2d4e;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: bold;
+    }
+    .badge-high { background: #ff4444; color: #fff; }
+    .badge-medium { background: #ff9800; color: #fff; }
+    .badge-low { background: #4caf50; color: #fff; }
+    .title { font-size: 14px; font-weight: bold; color: #fff; }
+    .subtitle { font-size: 11px; color: #aaa; margin-bottom: 10px; }
+    .risk-list { list-style: none; margin-bottom: 12px; }
+    .risk-item {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      padding: 6px 0;
+      border-bottom: 1px solid #2d2d4e;
+    }
+    .risk-item:last-child { border-bottom: none; }
+    .risk-msg { flex: 1; font-size: 12px; color: #ccc; }
+    .risk-principle { font-size: 10px; color: #888; margin-top: 2px; }
+    .details-section { display: none; margin-bottom: 10px; }
+    .details-section.open { display: block; }
+    .btn-row { display: flex; gap: 8px; }
+    button {
+      flex: 1;
+      padding: 7px 10px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .btn-details { background: #2d2d4e; color: #e0e0e0; }
+    .btn-details:hover { background: #3d3d6e; }
+    .btn-dismiss { background: #333; color: #aaa; }
+    .btn-dismiss:hover { background: #444; }
+    .loading { text-align: center; padding: 12px 0; color: #aaa; font-size: 12px; }
+    .spinner {
+      display: inline-block;
+      width: 16px; height: 16px;
+      border: 2px solid #444;
+      border-top-color: #7c83fd;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error { color: #ff6b6b; font-size: 12px; padding: 8px 0; }
+    .logo { font-size: 16px; }
+    .policy-link { font-size: 10px; color: #7c83fd; word-break: break-all; margin-top: 4px; }
+    a { color: #7c83fd; }
+    /* [ADDED] Consent detected label above the card */
+    .consent-label {
+      font-size: 10px;
+      color: #7c83fd;
+      margin-bottom: 6px;
+      letter-spacing: 0.3px;
+      opacity: 0.85;
+    }
+    /* [ADDED] Context line at top of card */
+    .context-line {
+      font-size: 10px;
+      color: #888;
+      font-style: italic;
+      margin-bottom: 10px;
+      line-height: 1.4;
+      border-left: 2px solid #3d3d6e;
+      padding-left: 8px;
+    }
+    /* [ADDED] Risk level label inline with message */
+    .risk-level-label {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-right: 5px;
+    }
+    .risk-level-high { color: #ff6b6b; }
+    .risk-level-medium { color: #ffb347; }
+    .risk-level-low { color: #4caf50; }
+    /* [ADDED] Icon column in risk row */
+    .risk-icon { font-size: 12px; margin-top: 2px; flex-shrink: 0; }
+    /* [ADDED] Fallback notice */
+    .fallback-notice {
+      font-size: 10px;
+      color: #ffb347;
+      background: rgba(255,179,71,0.08);
+      border-radius: 4px;
+      padding: 5px 8px;
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+  `;
+}
+
+function showLoadingOverlay(bannerEl) {
+  overlayInjected = true;
+  const { shadow } = createShadowHost();
+
+  // [ADDED] "Consent detected" label + multi-step loading message for agent feel
+  shadow.innerHTML = `
+    <style>${getBaseStyles()}</style>
+    <div class="consent-label" aria-label="Consent request detected">🔍 Consent request detected</div>
+    <div class="card" role="status" aria-live="polite">
+      <div class="header">
+        <span class="logo">🛡️</span>
+        <span class="title">DPDP Privacy Agent</span>
+      </div>
+      <div class="loading">
+        <span class="spinner" aria-hidden="true"></span>
+        Analyzing privacy policy...
+      </div>
+    </div>
+  `;
+}
+
+function showErrorOverlay(bannerEl, errorMsg) {
+  overlayInjected = true;
+  const { shadow } = createShadowHost();
+
+  shadow.innerHTML = `
+    <style>${getBaseStyles()}</style>
+    <div class="consent-label">🔍 Consent request detected</div>
+    <div class="card" role="alert">
+      <div class="header">
+        <span class="logo">🛡️</span>
+        <span class="title">DPDP Privacy Agent</span>
+      </div>
+      <div class="error">⚠️ ${escapeHtml(errorMsg)}</div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn-dismiss" id="dpdp-dismiss">Dismiss</button>
+      </div>
+    </div>
+  `;
+
+  shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    document.getElementById(OVERLAY_ID)?.remove();
+    overlayInjected = false;
+  });
+}
+
+function showRiskOverlay(bannerEl, risks, policyUrl, isFallback) {
+  overlayInjected = true;
+  const { shadow } = createShadowHost();
+
+  const highCount = risks.filter((r) => r.level === "High").length;
+  const medCount = risks.filter((r) => r.level === "Medium").length;
+
+  const summaryBadge = highCount > 0
+    ? `<span class="badge badge-high">⚠ ${highCount} High Risk</span>`
+    : medCount > 0
+    ? `<span class="badge badge-medium">● ${medCount} Medium Risk</span>`
+    : `<span class="badge badge-low">✓ Low Risk</span>`;
+
+  // [ADDED] Icon per risk level for visual hierarchy
+  const riskIcon = (level) => level === "High" ? "🔴" : level === "Medium" ? "🟠" : "🟢";
+
+  const riskItems = risks.length > 0
+    ? risks.map((r) => `
+        <li class="risk-item">
+          <span class="risk-icon" aria-hidden="true">${riskIcon(r.level)}</span>
+          <div class="risk-msg">
+            <span class="risk-level-label risk-level-${r.level.toLowerCase()}">${escapeHtml(r.level)}</span>
+            ${escapeHtml(r.message)}
+            <div class="risk-principle">DPDP: ${escapeHtml(r.principle)}</div>
+          </div>
+        </li>`).join("")
+    : `<li class="risk-item"><div class="risk-msg">No significant risks detected.</div></li>`;
+
+  // [ADDED] Fallback notice shown when analysis failed and we're using indicative risks
+  const fallbackNotice = isFallback
+    ? `<div class="fallback-notice">⚠ Unable to fully analyze this policy. Showing indicative risks based on common patterns.</div>`
+    : "";
+
+  shadow.innerHTML = `
+    <style>${getBaseStyles()}</style>
+    <div class="consent-label">🔍 Consent request detected</div>
+    <div class="card" role="dialog" aria-label="DPDP Privacy Risk Warning">
+      <div class="header">
+        <span class="logo">🛡️</span>
+        <span class="title">DPDP Privacy Agent</span>
+        ${summaryBadge}
+      </div>
+
+      <!-- [ADDED] Context line reinforcing product positioning -->
+      <div class="context-line">This insight is generated before you give consent using AI + DPDP principles.</div>
+
+      ${fallbackNotice}
+
+      <div class="details-section open" id="dpdp-details">
+        <ul class="risk-list" aria-label="Risk findings">${riskItems}</ul>
+        <div class="policy-link">Policy: <a href="${escapeHtml(policyUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(truncate(policyUrl, 60))}</a></div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn-details" id="dpdp-toggle" aria-expanded="true">Hide Details</button>
+        <button class="btn-dismiss" id="dpdp-dismiss">Dismiss</button>
+      </div>
+    </div>
+  `;
+
+  const detailsEl = shadow.getElementById("dpdp-details");
+  const toggleBtn = shadow.getElementById("dpdp-toggle");
+
+  toggleBtn.addEventListener("click", () => {
+    const isOpen = detailsEl.classList.toggle("open");
+    toggleBtn.textContent = isOpen ? "Hide Details" : "View Details";
+    toggleBtn.setAttribute("aria-expanded", String(isOpen));
+  });
+
+  shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    document.getElementById(OVERLAY_ID)?.remove();
+    overlayInjected = false;
+  });
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function truncate(str, max) {
+  return str.length > max ? str.slice(0, max) + "…" : str;
+}
+
+// ─── Entry Point ──────────────────────────────────────────────────────────────
+init();

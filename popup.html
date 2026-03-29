@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DPDP Privacy Warning Agent</title>
+  <style>
+    body {
+      width: 320px;
+      min-height: 200px;
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      background: #1a1a2e;
+      color: #e0e0e0;
+    }
+    h1 {
+      font-size: 15px;
+      margin: 0 0 4px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .subtitle {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: #aaa;
+      margin-bottom: 4px;
+    }
+    input[type="password"], input[type="text"] {
+      width: 100%;
+      padding: 8px 10px;
+      background: #2d2d4e;
+      border: 1px solid #3d3d6e;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 12px;
+      outline: none;
+      box-sizing: border-box;
+    }
+    input:focus { border-color: #7c83fd; }
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    button {
+      flex: 1;
+      padding: 8px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .btn-save { background: #7c83fd; color: #fff; }
+    .btn-save:hover { background: #6c73ed; }
+    .btn-clear { background: #333; color: #aaa; }
+    .btn-clear:hover { background: #444; }
+    .status {
+      margin-top: 10px;
+      font-size: 11px;
+      min-height: 16px;
+      color: #4caf50;
+    }
+    .status.error { color: #ff6b6b; }
+    .divider {
+      border: none;
+      border-top: 1px solid #2d2d4e;
+      margin: 14px 0;
+    }
+    .info {
+      font-size: 11px;
+      color: #888;
+      line-height: 1.5;
+    }
+    .info a { color: #7c83fd; }
+    .show-toggle {
+      background: none;
+      border: none;
+      color: #7c83fd;
+      cursor: pointer;
+      font-size: 11px;
+      padding: 0;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🛡️ DPDP Privacy Agent</h1>
+  <p class="subtitle">Analyzes privacy policies before you consent</p>
+
+  <label for="api-key">OpenRouter API Key</label>
+  <input type="password" id="api-key" placeholder="sk-or-..." autocomplete="off" />
+  <button class="show-toggle" id="toggle-visibility" type="button">Show</button>
+
+  <div class="btn-row">
+    <button class="btn-save" id="save-btn">Save Key</button>
+    <button class="btn-clear" id="clear-btn">Clear</button>
+  </div>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+
+  <hr class="divider" />
+
+  <div class="info">
+    Get a free API key at <a href="https://openrouter.ai" target="_blank" rel="noopener noreferrer">openrouter.ai</a>.
+    Your key is stored locally in your browser and never sent anywhere except OpenRouter.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

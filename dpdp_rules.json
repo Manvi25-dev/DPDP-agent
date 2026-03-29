@@ -1,0 +1,60 @@
+{
+  "principles": [
+    "Lawful Consent",
+    "Purpose Limitation",
+    "Data Minimization",
+    "Storage Limitation",
+    "Transparency",
+    "User Rights"
+  ],
+  "rules": [
+    {
+      "id": "retention_missing",
+      "field": "retention_periods",
+      "condition": "empty",
+      "risk": "High",
+      "principle": "Storage Limitation",
+      "message": "Data retention period not specified. Under DPDP, data must not be kept longer than necessary."
+    },
+    {
+      "id": "third_party_sharing",
+      "field": "third_party_sharing",
+      "condition": "present",
+      "risk": "Medium",
+      "principle": "Purpose Limitation",
+      "message": "Third-party data sharing detected. Verify if sharing aligns with the stated collection purpose."
+    },
+    {
+      "id": "consent_vague",
+      "field": "consent_mechanism",
+      "condition": "vague",
+      "risk": "Medium",
+      "principle": "Lawful Consent",
+      "message": "Consent mechanism is unclear or vague. DPDP requires free, specific, informed, and unambiguous consent."
+    },
+    {
+      "id": "no_user_rights",
+      "field": "user_rights",
+      "condition": "empty",
+      "risk": "High",
+      "principle": "User Rights",
+      "message": "No user rights mentioned (e.g., right to withdraw consent, erasure). DPDP mandates these rights."
+    },
+    {
+      "id": "no_purposes",
+      "field": "collection_purposes",
+      "condition": "empty",
+      "risk": "High",
+      "principle": "Transparency",
+      "message": "Data collection purposes not stated. DPDP requires clear disclosure of why data is collected."
+    },
+    {
+      "id": "no_data_types",
+      "field": "data_types_collected",
+      "condition": "empty",
+      "risk": "Medium",
+      "principle": "Data Minimization",
+      "message": "Types of data collected are not specified. Transparency about collected data is required under DPDP."
+    }
+  ]
+}
