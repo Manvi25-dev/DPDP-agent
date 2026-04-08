@@ -27,35 +27,31 @@ const POLICY_LINK_KEYWORDS = ["privacy policy", "privacy notice", "data protecti
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
-function init() {
+function runAgent() {
   if (pageFlowInitialized) return;
   pageFlowInitialized = true;
 
-  activeMode = detectMode();
-
-  if (activeMode === MODE.POLICY) {
+  if (isPolicyPage()) {
+    activeMode = MODE.POLICY;
+    console.log("[DPDP] POLICY MODE ACTIVATED");
     runPolicyMode();
     return;
   }
 
-  if (activeMode === MODE.BANNER) {
+  if (isCookieBannerPresent()) {
+    activeMode = MODE.BANNER;
+    console.log("[DPDP] BANNER MODE ACTIVATED");
     runBannerMode();
     return;
   }
 
+  activeMode = MODE.DEFAULT;
+  console.log("[DPDP] DEFAULT MODE");
   runDefaultMode();
 }
 
-// ─── Strict Mode Router ───────────────────────────────────────────────────────
-
-function detectMode() {
-  if (isPolicyPage()) return MODE.POLICY;
-
-  // Keep existing banner detection logic for non-policy pages.
-  const banner = findConsentElement();
-  if (banner) return MODE.BANNER;
-
-  return MODE.DEFAULT;
+function isCookieBannerPresent() {
+  return Boolean(findConsentElement());
 }
 
 function runPolicyMode() {
@@ -107,22 +103,27 @@ function runBannerMode() {
 }
 
 function runDefaultMode() {
-  // Intentional no-op: in default mode we keep the page untouched.
+  showNoConsent();
+}
+
+function showNoConsent() {
+  // Intentionally keeps the page untouched in default mode.
 }
 
 // ─── Policy Page Detection (Highest Priority) ────────────────────────────────
 
 function isPolicyPage() {
   const url = window.location.href.toLowerCase();
-  const urlHit = ["privacy", "policy", "cookie-policy", "terms"].some((token) => url.includes(token));
+  const urlMatch =
+    url.includes("privacy") ||
+    url.includes("policy") ||
+    url.includes("terms");
 
-  const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
-  const headingHit = headings.some((el) => {
-    const text = (el.innerText || el.textContent || "").toLowerCase();
-    return text.includes("privacy policy") || text.includes("cookie policy");
-  });
+  const textMatch = (document.body?.innerText || "")
+    .toLowerCase()
+    .includes("privacy policy");
 
-  return urlHit || headingHit;
+  return urlMatch || textMatch;
 }
 
 function extractVisiblePolicyText() {
@@ -929,4 +930,10 @@ function truncate(str, max) {
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
-init();
+window.addEventListener("load", () => {
+  setTimeout(runAgent, 500);
+});
+
+if (document.readyState === "complete") {
+  setTimeout(runAgent, 500);
+}
