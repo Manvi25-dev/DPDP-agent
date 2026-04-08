@@ -8,6 +8,10 @@
 let overlayInjected = false;
 let detectionDebounceTimer = null;
 let observerActive = false;
+let policyModeChecked = false;
+
+const POLICY_MODE_MAX_CHARS = 10000;
+const POLICY_MODE_MIN_CHARS = 800;
 
 // Keywords that indicate a consent/cookie banner
 const CONSENT_KEYWORDS = ["cookie", "privacy", "consent", "accept", "agree", "gdpr", "data protection", "terms"];
@@ -16,6 +20,8 @@ const POLICY_LINK_KEYWORDS = ["privacy policy", "privacy notice", "data protecti
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
 function init() {
+  detectPolicyPageMode();
+
   // Run once on load
   detectConsentBanner();
 
@@ -28,6 +34,62 @@ function init() {
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
+}
+
+// ─── Policy Page Detection (Parallel Flow) ───────────────────────────────────
+
+function detectPolicyPageMode() {
+  if (policyModeChecked) return;
+  policyModeChecked = true;
+
+  if (!shouldTriggerPolicyMode()) return;
+
+  const policyText = extractVisiblePolicyText();
+  if (!policyText || policyText.length < POLICY_MODE_MIN_CHARS) return;
+
+  showPolicyModeLoadingOverlay(window.location.href);
+
+  chrome.runtime.sendMessage(
+    {
+      type: "ANALYZE_POLICY_TEXT",
+      pageUrl: window.location.href,
+      policyText,
+    },
+    (response) => {
+      if (chrome.runtime.lastError) {
+        console.error("[DPDP] Policy mode message error:", chrome.runtime.lastError.message);
+        showPolicyModeErrorOverlay("Policy analysis could not be completed on this page.");
+        return;
+      }
+
+      if (!response || !response.success || !response.analysis) {
+        showPolicyModeErrorOverlay("Policy analysis could not be completed on this page.");
+        return;
+      }
+
+      showPolicyModeOverlay(response.analysis, window.location.href);
+    }
+  );
+}
+
+function shouldTriggerPolicyMode() {
+  const url = window.location.href.toLowerCase();
+  const urlHit = ["privacy", "policy", "terms"].some((token) => url.includes(token));
+
+  const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
+  const headingHit = headings.some((el) => {
+    const text = (el.innerText || el.textContent || "").toLowerCase();
+    return text.includes("privacy policy");
+  });
+
+  return urlHit || headingHit;
+}
+
+function extractVisiblePolicyText() {
+  const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+
+  return text.length > POLICY_MODE_MAX_CHARS ? text.slice(0, POLICY_MODE_MAX_CHARS) : text;
 }
 
 // ─── Consent Detection ────────────────────────────────────────────────────────
@@ -392,6 +454,32 @@ function getBaseStyles() {
       margin-bottom: 8px;
       line-height: 1.4;
     }
+    .policy-status-list {
+      list-style: none;
+      margin-bottom: 10px;
+    }
+    .policy-status-item {
+      font-size: 12px;
+      color: #ddd;
+      padding: 4px 0;
+      border-bottom: 1px solid #2d2d4e;
+    }
+    .policy-status-item:last-child {
+      border-bottom: none;
+    }
+    .risk-summary-title {
+      font-size: 11px;
+      color: #9fa8ff;
+      margin-top: 6px;
+      margin-bottom: 4px;
+      font-weight: 700;
+    }
+    .risk-summary-body {
+      font-size: 12px;
+      color: #c7c7dd;
+      line-height: 1.45;
+      margin-bottom: 8px;
+    }
   `;
 }
 
@@ -439,6 +527,162 @@ function showErrorOverlay(bannerEl, errorMsg) {
     document.getElementById(OVERLAY_ID)?.remove();
     overlayInjected = false;
   });
+}
+
+function showPolicyModeLoadingOverlay(pageUrl) {
+  overlayInjected = true;
+  const { shadow } = createShadowHost();
+
+  shadow.innerHTML = `
+    <style>${getBaseStyles()}</style>
+    <div class="consent-label">Policy Analysis</div>
+    <div class="card" role="status" aria-live="polite">
+      <div class="header">
+        <span class="logo">📄</span>
+        <span class="title">Policy Analysis</span>
+      </div>
+      <div class="loading">
+        <span class="spinner" aria-hidden="true"></span>
+        Reviewing visible policy text...
+      </div>
+      <div class="policy-link">Source: ${escapeHtml(truncate(pageUrl, 72))}</div>
+    </div>
+  `;
+}
+
+function showPolicyModeErrorOverlay(errorMsg) {
+  overlayInjected = true;
+  const { shadow } = createShadowHost();
+
+  shadow.innerHTML = `
+    <style>${getBaseStyles()}</style>
+    <div class="consent-label">Policy Analysis</div>
+    <div class="card" role="alert">
+      <div class="header">
+        <span class="logo">📄</span>
+        <span class="title">Policy Analysis</span>
+      </div>
+      <div class="error">⚠️ ${escapeHtml(errorMsg)}</div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn-dismiss" id="dpdp-dismiss">Dismiss</button>
+      </div>
+    </div>
+  `;
+
+  shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    document.getElementById(OVERLAY_ID)?.remove();
+    overlayInjected = false;
+  });
+}
+
+function showPolicyModeOverlay(analysis, pageUrl) {
+  overlayInjected = true;
+  const { shadow } = createShadowHost();
+
+  const statusRows = buildPolicyStatusRows(analysis);
+  const riskSummary = buildPolicyRiskSummary(statusRows);
+
+  const statusMarkup = statusRows
+    .map((row) => `<li class="policy-status-item">${row.icon} ${escapeHtml(row.label)}: ${escapeHtml(row.value)}</li>`)
+    .join("");
+
+  const detailsMarkup = `
+    <ul class="risk-list" aria-label="Detailed policy analysis">
+      <li class="risk-item"><div class="risk-msg"><span class="risk-level-label risk-level-low">Data Types</span> ${escapeHtml(formatArray(analysis.data_types_collected))}</div></li>
+      <li class="risk-item"><div class="risk-msg"><span class="risk-level-label risk-level-low">Purposes</span> ${escapeHtml(formatArray(analysis.collection_purposes))}</div></li>
+      <li class="risk-item"><div class="risk-msg"><span class="risk-level-label risk-level-low">Third-Party Sharing</span> ${escapeHtml(analysis.third_party_sharing || "Not mentioned")}</div></li>
+      <li class="risk-item"><div class="risk-msg"><span class="risk-level-label risk-level-low">Retention</span> ${escapeHtml(analysis.retention_periods || "Not mentioned")}</div></li>
+      <li class="risk-item"><div class="risk-msg"><span class="risk-level-label risk-level-low">User Rights</span> ${escapeHtml(formatArray(analysis.user_rights))}</div></li>
+    </ul>
+  `;
+
+  shadow.innerHTML = `
+    <style>${getBaseStyles()}</style>
+    <div class="consent-label">Policy Analysis</div>
+    <div class="card" role="dialog" aria-label="Policy Analysis Results">
+      <div class="header">
+        <span class="logo">📄</span>
+        <span class="title">Policy Analysis</span>
+      </div>
+
+      <ul class="policy-status-list" aria-label="Policy findings">
+        ${statusMarkup}
+      </ul>
+
+      <div class="risk-summary-title">Risk Summary</div>
+      <div class="risk-summary-body">${escapeHtml(riskSummary)}</div>
+
+      <div class="details-section" id="dpdp-policy-details">
+        ${detailsMarkup}
+      </div>
+
+      <div class="policy-link">Source: <a href="${escapeHtml(pageUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(truncate(pageUrl, 60))}</a></div>
+
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn-details" id="dpdp-policy-toggle" aria-expanded="false">View Detailed Analysis</button>
+        <button class="btn-dismiss" id="dpdp-dismiss">Dismiss</button>
+      </div>
+    </div>
+  `;
+
+  const detailsEl = shadow.getElementById("dpdp-policy-details");
+  const toggleBtn = shadow.getElementById("dpdp-policy-toggle");
+
+  toggleBtn.addEventListener("click", () => {
+    const isOpen = detailsEl.classList.toggle("open");
+    toggleBtn.textContent = isOpen ? "Hide Detailed Analysis" : "View Detailed Analysis";
+    toggleBtn.setAttribute("aria-expanded", String(isOpen));
+  });
+
+  shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    document.getElementById(OVERLAY_ID)?.remove();
+    overlayInjected = false;
+  });
+}
+
+function buildPolicyStatusRows(analysis) {
+  const collected = Array.isArray(analysis?.data_types_collected) && analysis.data_types_collected.length > 0;
+  const purposes = Array.isArray(analysis?.collection_purposes) && analysis.collection_purposes.length > 0;
+  const rights = Array.isArray(analysis?.user_rights) && analysis.user_rights.length > 0;
+
+  const sharingText = (analysis?.third_party_sharing || "").toLowerCase();
+  const retentionText = (analysis?.retention_periods || "").toLowerCase();
+
+  const sharingDetected = Boolean(sharingText.trim())
+    && !/(none|not shared|no third party|not applicable)/.test(sharingText);
+
+  const retentionSpecified = Boolean(retentionText.trim())
+    && !/(not specified|unknown|n\/?a|none|not mentioned)/.test(retentionText);
+
+  return [
+    { icon: collected ? "✔" : "⚠", label: "Data Collection", value: collected ? "Present" : "Unclear" },
+    { icon: purposes ? "✔" : "⚠", label: "Purpose Limitation", value: purposes ? "Clearly defined" : "Unclear" },
+    { icon: sharingDetected ? "⚠" : "✔", label: "Third-party sharing", value: sharingDetected ? "Detected" : "Not detected" },
+    { icon: retentionSpecified ? "✔" : "❌", label: "Retention", value: retentionSpecified ? "Specified" : "Not specified" },
+    { icon: rights ? "✔" : "❌", label: "User rights", value: rights ? "Mentioned" : "Not mentioned" },
+  ];
+}
+
+function buildPolicyRiskSummary(statusRows) {
+  const criticalCount = statusRows.filter((row) => row.icon === "❌").length;
+  const warningCount = statusRows.filter((row) => row.icon === "⚠").length;
+
+  const firstLine = criticalCount > 0
+    ? "Key safeguards are missing, especially around retention or user rights."
+    : "No critical gaps were detected in the visible policy text.";
+
+  const secondLine = warningCount > 0
+    ? "Some clauses are unclear or indicate potential third-party sharing risks."
+    : "Most major disclosures appear to be stated clearly.";
+
+  const thirdLine = "Review detailed clauses before accepting terms on this page.";
+
+  return `${firstLine} ${secondLine} ${thirdLine}`;
+}
+
+function formatArray(value) {
+  if (!Array.isArray(value) || value.length === 0) return "Not mentioned";
+  return value.join(", ");
 }
 
 function showRiskOverlay(bannerEl, risks, policyUrl, isFallback, analysis, bannerContext) {

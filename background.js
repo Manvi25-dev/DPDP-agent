@@ -15,6 +15,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     handleAnalyzePolicy(message.policyUrl, sendResponse);
     return true; // keep channel open for async response
   }
+  if (message.type === "ANALYZE_POLICY_TEXT") {
+    handleAnalyzePolicyText(message.pageUrl, message.policyText, sendResponse);
+    return true; // keep channel open for async response
+  }
   if (message.type === "GET_API_KEY") {
     chrome.storage.local.get("openrouter_api_key", (result) => {
       sendResponse({ apiKey: result.openrouter_api_key || null });
@@ -67,6 +71,46 @@ async function handleAnalyzePolicy(policyUrl, sendResponse) {
   } catch (err) {
     console.error("[DPDP] handleAnalyzePolicy error:", err);
     sendResponse({ success: false, error: "An unexpected error occurred during analysis." });
+  }
+}
+
+async function handleAnalyzePolicyText(pageUrl, policyText, sendResponse) {
+  try {
+    const cacheKey = `page:${pageUrl}`;
+
+    // 1. Check session cache
+    const cached = await getFromCache(cacheKey);
+    if (cached) {
+      console.log("[DPDP] Policy-page cache hit for:", pageUrl);
+      sendResponse({ success: true, analysis: cached, cached: true });
+      return;
+    }
+
+    // 2. Validate text payload
+    if (!policyText || typeof policyText !== "string" || policyText.trim().length < 100) {
+      sendResponse({ success: false, error: "Policy text is missing or too short for analysis." });
+      return;
+    }
+
+    // 3. Get API key (falls back to bundled default)
+    const DEFAULT_API_KEY = "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";
+    const { openrouter_api_key: storedKey } = await chrome.storage.local.get("openrouter_api_key");
+    const apiKey = storedKey || DEFAULT_API_KEY;
+
+    // 4. Call LLM using visible page text
+    const analysis = await analyzePolicyWithLLM(policyText, apiKey);
+    if (!analysis) {
+      sendResponse({ success: false, error: "LLM analysis failed or returned invalid data." });
+      return;
+    }
+
+    // 5. Cache result by URL
+    await saveToCache(cacheKey, analysis);
+
+    sendResponse({ success: true, analysis, cached: false });
+  } catch (err) {
+    console.error("[DPDP] handleAnalyzePolicyText error:", err);
+    sendResponse({ success: false, error: "An unexpected error occurred during policy-page analysis." });
   }
 }
 
