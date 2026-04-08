@@ -10,6 +10,8 @@ let detectionDebounceTimer = null;
 let observerActive = false;
 let pageFlowInitialized = false;
 let activeMode = "DEFAULT_MODE";
+let modeRecheckObserverActive = false;
+let modeRecheckTimer = null;
 
 const MODE = {
   POLICY: "POLICY_MODE",
@@ -25,10 +27,17 @@ const POLICY_MODE_MAX_CHARS = 10000;
 const CONSENT_KEYWORDS = ["cookie", "privacy", "consent", "accept", "agree", "gdpr", "data protection", "terms"];
 const POLICY_LINK_KEYWORDS = ["privacy policy", "privacy notice", "data protection", "privacy statement"];
 
+console.log("[DPDP] content.js loaded on:", window.location.href);
+
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
 function runAgent() {
-  if (pageFlowInitialized) return;
+  console.log("[DPDP] runAgent() called");
+
+  if (pageFlowInitialized && activeMode !== MODE.DEFAULT) {
+    console.log("[DPDP] runAgent() skipped; active mode:", activeMode);
+    return;
+  }
   pageFlowInitialized = true;
 
   if (isPolicyPage()) {
@@ -56,6 +65,7 @@ function isCookieBannerPresent() {
 }
 
 function updateUIToPolicyMode() {
+  console.log("SWITCHING TO POLICY MODE");
   showPolicyModeLoadingOverlay(window.location.href);
 }
 
@@ -111,6 +121,7 @@ function runBannerMode() {
 
 function runDefaultMode() {
   showNoConsent();
+  startModeRecheckObserver();
 }
 
 function showNoConsent() {
@@ -133,10 +144,33 @@ function isPolicyPage() {
     h.includes("privacy policy") || h.includes("cookie policy")
   );
 
-  console.log("URL MATCH:", urlMatch);
-  console.log("HEADING MATCH:", headingMatch);
+  const fullTextMatch = (document.body?.innerText || "")
+    .toLowerCase()
+    .includes("privacy policy");
 
-  return urlMatch || headingMatch;
+  console.log("URL:", window.location.href);
+  console.log("URL MATCH:", urlMatch);
+  console.log("HEADINGS:", headings);
+  console.log("HEADING MATCH:", headingMatch);
+  console.log("FULL TEXT MATCH:", fullTextMatch);
+
+  return urlMatch || headingMatch || fullTextMatch;
+}
+
+function startModeRecheckObserver() {
+  if (modeRecheckObserverActive || !document.body) return;
+  modeRecheckObserverActive = true;
+
+  const observer = new MutationObserver(() => {
+    if (activeMode !== MODE.DEFAULT) return;
+    clearTimeout(modeRecheckTimer);
+    modeRecheckTimer = setTimeout(() => {
+      pageFlowInitialized = false;
+      runAgent();
+    }, 500);
+  });
+
+  observer.observe(document.body, { childList: true, subtree: true });
 }
 
 function extractVisiblePolicyText() {
