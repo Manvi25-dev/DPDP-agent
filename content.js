@@ -8,10 +8,18 @@
 let overlayInjected = false;
 let detectionDebounceTimer = null;
 let observerActive = false;
-let policyModeChecked = false;
+let pageFlowInitialized = false;
+let activeMode = "DEFAULT_MODE";
+
+const MODE = {
+  POLICY: "POLICY_MODE",
+  BANNER: "BANNER_MODE",
+  DEFAULT: "DEFAULT_MODE",
+};
+
+const pageRunCache = new Set();
 
 const POLICY_MODE_MAX_CHARS = 10000;
-const POLICY_MODE_MIN_CHARS = 800;
 
 // Keywords that indicate a consent/cookie banner
 const CONSENT_KEYWORDS = ["cookie", "privacy", "consent", "accept", "agree", "gdpr", "data protection", "terms"];
@@ -20,39 +28,50 @@ const POLICY_LINK_KEYWORDS = ["privacy policy", "privacy notice", "data protecti
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
 function init() {
-  detectPolicyPageMode();
+  if (pageFlowInitialized) return;
+  pageFlowInitialized = true;
 
-  // Run once on load
-  detectConsentBanner();
+  activeMode = detectMode();
 
-  // Watch for dynamically injected banners
-  if (!observerActive) {
-    observerActive = true;
-    const observer = new MutationObserver(() => {
-      clearTimeout(detectionDebounceTimer);
-      detectionDebounceTimer = setTimeout(detectConsentBanner, 600);
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+  if (activeMode === MODE.POLICY) {
+    runPolicyMode();
+    return;
   }
+
+  if (activeMode === MODE.BANNER) {
+    runBannerMode();
+    return;
+  }
+
+  runDefaultMode();
 }
 
-// ─── Policy Page Detection (Parallel Flow) ───────────────────────────────────
+// ─── Strict Mode Router ───────────────────────────────────────────────────────
 
-function detectPolicyPageMode() {
-  if (policyModeChecked) return;
-  policyModeChecked = true;
+function detectMode() {
+  if (isPolicyPage()) return MODE.POLICY;
 
-  if (!shouldTriggerPolicyMode()) return;
+  // Keep existing banner detection logic for non-policy pages.
+  const banner = findConsentElement();
+  if (banner) return MODE.BANNER;
+
+  return MODE.DEFAULT;
+}
+
+function runPolicyMode() {
+  const pageUrl = window.location.href;
+  if (pageRunCache.has(pageUrl)) return;
+  pageRunCache.add(pageUrl);
 
   const policyText = extractVisiblePolicyText();
-  if (!policyText || policyText.length < POLICY_MODE_MIN_CHARS) return;
+  if (!policyText) return;
 
-  showPolicyModeLoadingOverlay(window.location.href);
+  showPolicyModeLoadingOverlay(pageUrl);
 
   chrome.runtime.sendMessage(
     {
       type: "ANALYZE_POLICY_TEXT",
-      pageUrl: window.location.href,
+      pageUrl,
       policyText,
     },
     (response) => {
@@ -67,34 +86,55 @@ function detectPolicyPageMode() {
         return;
       }
 
-      showPolicyModeOverlay(response.analysis, window.location.href);
+      showPolicyModeOverlay(response.analysis, pageUrl);
     }
   );
 }
 
-function shouldTriggerPolicyMode() {
+function runBannerMode() {
+  // Run once on load
+  detectConsentBanner();
+
+  // Watch for dynamically injected banners
+  if (!observerActive) {
+    observerActive = true;
+    const observer = new MutationObserver(() => {
+      clearTimeout(detectionDebounceTimer);
+      detectionDebounceTimer = setTimeout(detectConsentBanner, 600);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+}
+
+function runDefaultMode() {
+  // Intentional no-op: in default mode we keep the page untouched.
+}
+
+// ─── Policy Page Detection (Highest Priority) ────────────────────────────────
+
+function isPolicyPage() {
   const url = window.location.href.toLowerCase();
-  const urlHit = ["privacy", "policy", "terms"].some((token) => url.includes(token));
+  const urlHit = ["privacy", "policy", "cookie-policy", "terms"].some((token) => url.includes(token));
 
   const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
   const headingHit = headings.some((el) => {
     const text = (el.innerText || el.textContent || "").toLowerCase();
-    return text.includes("privacy policy");
+    return text.includes("privacy policy") || text.includes("cookie policy");
   });
 
   return urlHit || headingHit;
 }
 
 function extractVisiblePolicyText() {
-  const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+  const text = (document.body?.innerText || "").slice(0, POLICY_MODE_MAX_CHARS).trim();
   if (!text) return "";
-
-  return text.length > POLICY_MODE_MAX_CHARS ? text.slice(0, POLICY_MODE_MAX_CHARS) : text;
+  return text;
 }
 
 // ─── Consent Detection ────────────────────────────────────────────────────────
 
 function detectConsentBanner() {
+  if (activeMode === MODE.POLICY) return;
   if (overlayInjected) return;
 
   const banner = findConsentElement();
