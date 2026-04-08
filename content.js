@@ -34,7 +34,8 @@ function runAgent() {
   if (isPolicyPage()) {
     activeMode = MODE.POLICY;
     console.log("[DPDP] POLICY MODE ACTIVATED");
-    runPolicyMode();
+    updateUIToPolicyMode();
+    runPolicyAnalysis();
     return;
   }
 
@@ -54,15 +55,17 @@ function isCookieBannerPresent() {
   return Boolean(findConsentElement());
 }
 
-function runPolicyMode() {
+function updateUIToPolicyMode() {
+  showPolicyModeLoadingOverlay(window.location.href);
+}
+
+function runPolicyAnalysis() {
   const pageUrl = window.location.href;
   if (pageRunCache.has(pageUrl)) return;
   pageRunCache.add(pageUrl);
 
   const policyText = extractVisiblePolicyText();
   if (!policyText) return;
-
-  showPolicyModeLoadingOverlay(pageUrl);
 
   chrome.runtime.sendMessage(
     {
@@ -85,6 +88,10 @@ function runPolicyMode() {
       showPolicyModeOverlay(response.analysis, pageUrl);
     }
   );
+}
+
+function runPolicyMode() {
+  runPolicyAnalysis();
 }
 
 function runBannerMode() {
@@ -119,11 +126,17 @@ function isPolicyPage() {
     url.includes("policy") ||
     url.includes("terms");
 
-  const textMatch = (document.body?.innerText || "")
-    .toLowerCase()
-    .includes("privacy policy");
+  const headings = Array.from(document.querySelectorAll("h1, h2, h3"))
+    .map((el) => (el.innerText || "").toLowerCase());
 
-  return urlMatch || textMatch;
+  const headingMatch = headings.some((h) =>
+    h.includes("privacy policy") || h.includes("cookie policy")
+  );
+
+  console.log("URL MATCH:", urlMatch);
+  console.log("HEADING MATCH:", headingMatch);
+
+  return urlMatch || headingMatch;
 }
 
 function extractVisiblePolicyText() {
@@ -930,10 +943,16 @@ function truncate(str, max) {
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
-window.addEventListener("load", () => {
-  setTimeout(runAgent, 500);
-});
+function initAgent() {
+  console.log("INIT RUNNING");
+
+  setTimeout(() => {
+    runAgent();
+  }, 1000);
+}
+
+window.addEventListener("load", initAgent);
 
 if (document.readyState === "complete") {
-  setTimeout(runAgent, 500);
+  initAgent();
 }
