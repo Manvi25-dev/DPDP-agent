@@ -141,6 +141,8 @@ function resolveUrl(href) {
 // ─── Analysis Trigger ─────────────────────────────────────────────────────────
 
 function triggerAnalysis(policyUrl, bannerEl) {
+  const bannerContext = extractBannerContext(bannerEl);
+
   // [ADDED] Show loading state immediately with "agent feel"
   showLoadingOverlay(bannerEl);
 
@@ -155,7 +157,7 @@ function triggerAnalysis(policyUrl, bannerEl) {
     if (!response || !response.success) {
       // [ADDED] On failure, show fallback risks instead of hard error
       const fallbackRisks = getFallbackRisks();
-      setTimeout(() => showRiskOverlay(bannerEl, fallbackRisks, policyUrl, true), 1800);
+      setTimeout(() => showRiskOverlay(bannerEl, fallbackRisks, policyUrl, true, null, bannerContext), 1800);
       return;
     }
 
@@ -165,8 +167,30 @@ function triggerAnalysis(policyUrl, bannerEl) {
     const paddedRisks = padWithFallbacks(risks);
 
     // [ADDED] Delay render by 1.8s to simulate AI processing
-    setTimeout(() => showRiskOverlay(bannerEl, paddedRisks, policyUrl, false), 1800);
+    setTimeout(() => showRiskOverlay(bannerEl, paddedRisks, policyUrl, false, response.analysis, bannerContext), 1800);
   });
+}
+
+function extractBannerContext(bannerEl) {
+  const fallbackContext = {
+    cookieSettingsDetected: false,
+    acceptAllDetected: false,
+  };
+
+  if (!bannerEl) return fallbackContext;
+
+  const combinedText = [
+    bannerEl.innerText || bannerEl.textContent || "",
+    ...Array.from(bannerEl.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']")).map((el) => {
+      if (el.tagName === "INPUT") return el.value || "";
+      return el.innerText || el.textContent || el.getAttribute("aria-label") || "";
+    }),
+  ].join(" ").toLowerCase();
+
+  return {
+    cookieSettingsDetected: /(cookie settings|cookie preferences|manage cookies|manage preferences|privacy settings|customi[sz]e)/.test(combinedText),
+    acceptAllDetected: /(accept all|allow all|agree all|accept cookies|allow cookies)/.test(combinedText),
+  };
 }
 
 // [ADDED] Fallback risks shown when analysis fails or returns too few results
@@ -417,7 +441,7 @@ function showErrorOverlay(bannerEl, errorMsg) {
   });
 }
 
-function showRiskOverlay(bannerEl, risks, policyUrl, isFallback) {
+function showRiskOverlay(bannerEl, risks, policyUrl, isFallback, analysis, bannerContext) {
   overlayInjected = true;
   const { shadow } = createShadowHost();
 
@@ -450,6 +474,8 @@ function showRiskOverlay(bannerEl, risks, policyUrl, isFallback) {
     ? `<div class="fallback-notice">⚠ Unable to fully analyze this policy. Showing indicative risks based on common patterns.</div>`
     : "";
 
+  const recommendationBlock = buildRecommendationBlock({ risks, analysis, bannerContext });
+
   shadow.innerHTML = `
     <style>${getBaseStyles()}</style>
     <div class="consent-label">🔍 Consent request detected</div>
@@ -467,6 +493,7 @@ function showRiskOverlay(bannerEl, risks, policyUrl, isFallback) {
 
       <div class="details-section open" id="dpdp-details">
         <ul class="risk-list" aria-label="Risk findings">${riskItems}</ul>
+        ${recommendationBlock}
         <div class="policy-link">Policy: <a href="${escapeHtml(policyUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(truncate(policyUrl, 60))}</a></div>
       </div>
 
@@ -490,6 +517,116 @@ function showRiskOverlay(bannerEl, risks, policyUrl, isFallback) {
     document.getElementById(OVERLAY_ID)?.remove();
     overlayInjected = false;
   });
+}
+
+function buildRecommendationBlock({ risks, analysis, bannerContext }) {
+  const safeContext = bannerContext || { cookieSettingsDetected: false, acceptAllDetected: false };
+  const thirdPartySharingDetected = Boolean((analysis?.third_party_sharing || "").trim())
+    || risks.some((r) => r.principle === "Purpose Limitation");
+
+  const recommendationRows = [];
+
+  if (safeContext.cookieSettingsDetected) {
+    recommendationRows.push(`
+      <li class="risk-item">
+        <div class="risk-msg">
+          <span class="risk-level-label risk-level-low">STEP 1</span>
+          Click "Cookie Settings".
+          <div class="risk-principle">Consequence: opens granular controls so you can avoid blanket consent.</div>
+        </div>
+      </li>
+    `);
+
+    recommendationRows.push(`
+      <li class="risk-item">
+        <div class="risk-msg">
+          <span class="risk-level-label risk-level-low">STEP 2</span>
+          Inside settings, disable:<br>
+          • Performance cookies<br>
+          • Functional cookies<br>
+          • Targeting/advertising cookies<br>
+          Keep enabled:<br>
+          • Strictly necessary cookies
+          <div class="risk-principle">Consequence: reduces optional tracking while preserving essential site functionality.</div>
+          ${thirdPartySharingDetected ? '<div class="risk-principle">Third-party sharing detected: prioritize disabling targeting/advertising cookies to reduce external data transfer.</div>' : ""}
+        </div>
+      </li>
+    `);
+
+    recommendationRows.push(`
+      <li class="risk-item">
+        <div class="risk-msg">
+          <span class="risk-level-label risk-level-low">STEP 3</span>
+          Click "Confirm Choices" or "Save Preferences".
+          <div class="risk-principle">Consequence: stores a narrower consent profile instead of full access.</div>
+        </div>
+      </li>
+    `);
+  } else {
+    recommendationRows.push(`
+      <li class="risk-item">
+        <div class="risk-msg">
+          <span class="risk-level-label risk-level-low">STEP 1</span>
+          Open the consent panel and look for "Cookie Settings", "Manage Preferences", or "Customize".
+          <div class="risk-principle">Consequence: unlocks category-level controls instead of one-click blanket consent.</div>
+        </div>
+      </li>
+    `);
+
+    recommendationRows.push(`
+      <li class="risk-item">
+        <div class="risk-msg">
+          <span class="risk-level-label risk-level-low">STEP 2</span>
+          Inside settings, disable optional categories (Performance, Functional, Targeting/Advertising) and keep only strictly necessary cookies enabled.
+          <div class="risk-principle">Consequence: minimizes tracking surface while preserving core website operation.</div>
+          ${thirdPartySharingDetected ? '<div class="risk-principle">Third-party sharing detected: prioritizing "Targeting/Advertising" off reduces external sharing risk.</div>' : ""}
+        </div>
+      </li>
+    `);
+
+    recommendationRows.push(`
+      <li class="risk-item">
+        <div class="risk-msg">
+          <span class="risk-level-label risk-level-low">STEP 3</span>
+          Save your choices using "Confirm", "Save Preferences", or equivalent action.
+          <div class="risk-principle">Consequence: records explicit, narrower consent choices for this site.</div>
+        </div>
+      </li>
+    `);
+  }
+
+  recommendationRows.push(`
+    <li class="risk-item">
+      <div class="risk-msg">
+        <span class="risk-level-label risk-level-medium">Decision Insight</span>
+        If you click "Accept All":<br>
+        • Enables third-party data sharing<br>
+        • Enables behavioral tracking<br>
+        • Reduces consent granularity
+        ${safeContext.acceptAllDetected ? '<div class="risk-principle">Accept All option is visible on this banner, so this risk path is immediately actionable.</div>' : ""}
+      </div>
+    </li>
+  `);
+
+  recommendationRows.push(`
+    <li class="risk-item">
+      <div class="risk-msg">
+        <span class="risk-level-label risk-level-low">Decision Insight</span>
+        If you follow this recommendation:<br>
+        • Limits data sharing<br>
+        • Improves privacy control<br>
+        • Aligns closer with DPDP principles
+      </div>
+    </li>
+  `);
+
+  if (recommendationRows.length === 0) return "";
+
+  return `
+    <ul class="risk-list" aria-label="Actionable recommendations">
+      ${recommendationRows.join("")}
+    </ul>
+  `;
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
