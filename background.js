@@ -190,19 +190,94 @@ async function analyzePolicyWithLLM(policyText, apiKey) {
 
     if (!response.ok) {
       const errBody = await response.text();
-      console.error("[DPDP] OpenRouter error:", response.status, errBody);
-      return null;
+
+      // 429s are common on shared/free providers; avoid surfacing as hard extension errors.
+      if (response.status === 429) {
+        console.warn("[DPDP] OpenRouter rate-limited (429). Falling back to local heuristic analysis.");
+        return createHeuristicAnalysis(policyText);
+      }
+
+      console.warn("[DPDP] OpenRouter non-OK response:", response.status, errBody);
+      return createHeuristicAnalysis(policyText);
     }
 
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content;
-    if (!content) return null;
+    if (!content) {
+      console.warn("[DPDP] Empty model response. Falling back to local heuristic analysis.");
+      return createHeuristicAnalysis(policyText);
+    }
 
-    return parseJsonSafely(content);
+    const parsed = parseJsonSafely(content);
+    return parsed || createHeuristicAnalysis(policyText);
   } catch (err) {
-    console.error("[DPDP] analyzePolicyWithLLM error:", err);
-    return null;
+    console.warn("[DPDP] analyzePolicyWithLLM exception. Falling back to local heuristic analysis.", err);
+    return createHeuristicAnalysis(policyText);
   }
+}
+
+function createHeuristicAnalysis(policyText) {
+  const text = (policyText || "").toLowerCase();
+
+  const dataTypes = collectMatches(text, [
+    ["email", /\bemail\b/g],
+    ["name", /\bname\b/g],
+    ["phone", /\b(phone|mobile|telephone)\b/g],
+    ["address", /\b(address|location)\b/g],
+    ["payment", /\b(card|payment|billing)\b/g],
+    ["device info", /\b(device|browser|ip address|cookie id)\b/g],
+  ]);
+
+  const purposes = collectMatches(text, [
+    ["service delivery", /\b(provide|deliver|operate)\b/g],
+    ["account management", /\b(account|registration|login)\b/g],
+    ["analytics", /\b(analytics|measure|improve)\b/g],
+    ["marketing", /\b(marketing|promotion|advertising)\b/g],
+    ["support", /\b(support|assist|customer service)\b/g],
+    ["security", /\b(security|fraud|abuse|protect)\b/g],
+  ]);
+
+  const rights = collectMatches(text, [
+    ["access", /\b(access|obtain a copy)\b/g],
+    ["deletion", /\b(delete|erasure|erase|remove)\b/g],
+    ["correction", /\b(correct|rectif)\b/g],
+    ["withdraw consent", /\b(withdraw|revoke)\b/g],
+    ["complaint", /\b(grievance|complaint|authority)\b/g],
+  ]);
+
+  const retentionSentence = extractFirstSentence(text, /(retain|retention|store for|kept for|keep your data)/i);
+  const sharingSentence = extractFirstSentence(text, /(third\s*party|share|partners|service providers|vendors)/i);
+  const consentSentence = extractFirstSentence(text, /(consent|agree|accept|opt\s*out|opt\s*in)/i);
+
+  return {
+    data_types_collected: dataTypes,
+    collection_purposes: purposes,
+    retention_periods: retentionSentence,
+    third_party_sharing: sharingSentence,
+    consent_mechanism: consentSentence,
+    user_rights: rights,
+  };
+}
+
+function collectMatches(text, patterns) {
+  const found = [];
+  for (const [label, regex] of patterns) {
+    if (regex.test(text)) found.push(label);
+    if (found.length >= 10) break;
+  }
+  return found;
+}
+
+function extractFirstSentence(text, pattern) {
+  const match = text.match(pattern);
+  if (!match || typeof match.index !== "number") return "";
+
+  const start = Math.max(0, text.lastIndexOf(".", match.index - 1) + 1);
+  const endIndex = text.indexOf(".", match.index);
+  const end = endIndex === -1 ? Math.min(text.length, match.index + 200) : endIndex + 1;
+  const sentence = text.slice(start, end).trim();
+
+  return sentence.length > 200 ? sentence.slice(0, 200) : sentence;
 }
 
 function buildPrompt(policyText) {
