@@ -11,6 +11,7 @@ let activeMode = "DEFAULT_MODE";
 let modeRecheckObserverActive = false;
 let modeRecheckTimer = null;
 let overlayDragCleanup = null;
+let policySourceUrl = null;
 
 const MODE = {
   POLICY: "POLICY_MODE",
@@ -93,11 +94,12 @@ function startModeRecheckObserver() {
 }
 
 function renderPolicyMode() {
-  const analysis = createPolicyPageFallbackAnalysis(extractVisiblePolicyText() || (document.body?.innerText || ""), window.location.href);
+  policySourceUrl = extractPolicyUrl(document.body) || window.location.href;
+  const analysis = createPolicyPageFallbackAnalysis(extractVisiblePolicyText() || (document.body?.innerText || ""), policySourceUrl);
   renderUnifiedOverlay({
     mode: MODE.POLICY,
     analysis,
-    sourceUrl: window.location.href,
+    sourceUrl: policySourceUrl,
     risks: padWithFallbacks(mapRisks(analysis)),
     bannerContext: { cookieSettingsDetected: false, acceptAllDetected: false },
     isFallback: false,
@@ -111,13 +113,14 @@ function detectConsentBanner() {
   if (!banner) return;
 
   const policyUrl = extractPolicyUrl(banner) || window.location.href;
+  policySourceUrl = policyUrl;
   const bannerText = banner.innerText || banner.textContent || "";
   const analysis = analyzeText(`${bannerText}\n${document.body?.innerText || ""}`);
 
   renderUnifiedOverlay({
     mode: MODE.BANNER,
     analysis,
-    sourceUrl: policyUrl,
+    sourceUrl: policySourceUrl,
     risks: padWithFallbacks(mapRisks(analysis)),
     bannerContext: extractBannerContext(banner),
     isFallback: false,
