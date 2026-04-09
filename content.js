@@ -332,6 +332,7 @@ function renderUnifiedOverlay({ mode, analysis, sourceUrl, risks = [], bannerCon
   const sourceLink = sourceUrl || window.location.href;
   const highlightClass = mode === MODE.BANNER ? "section-highlight" : "";
   const titlePrefix = mode === MODE.BANNER ? "Consent request detected" : "Policy Analysis";
+  const showCookieSettingsButton = Boolean(bannerContext?.cookieSettingsDetected);
 
   const checkMarkup = checkRows.map((row) => `
     <li class="policy-check-item">
@@ -350,38 +351,38 @@ function renderUnifiedOverlay({ mode, analysis, sourceUrl, risks = [], bannerCon
   shadow.innerHTML = `
     <style>${getBaseStyles()}</style>
     <div class="consent-label">${escapeHtml(titlePrefix)}</div>
-    <div class="card" role="dialog" aria-label="DPDP Privacy Analysis">
-      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag to move</span></div>
+    <div class="card" id="dpdp-panel" role="dialog" aria-label="DPDP Privacy Analysis">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag left/right</span></div>
       <div class="header"><span class="logo">🛡️</span><span class="title">DPDP Privacy Agent</span></div>
 
       ${fallbackNotice}
 
-      <div class="panel-section" aria-label="Policy analysis summary">
+      <div class="panel-section recommended-action-section" aria-label="Recommended action">
         <div class="section-kicker">Section 1</div>
+        <div class="section-title">⚠ Recommended Action</div>
+        <div class="recommended-action-box">${escapeHtml(recommendedAction)}</div>
+      </div>
+
+      <div class="panel-section ${highlightClass} decision-section" aria-label="Decision insight">
+        <div class="section-kicker">Section 2</div>
+        <div class="section-title">Decision Insight</div>
+        ${decisionBlock}
+      </div>
+
+      <div class="panel-section" aria-label="Policy analysis summary">
+        <div class="section-kicker">Section 3</div>
         <div class="section-title">Policy Analysis</div>
         <ul class="policy-check-list" aria-label="Policy findings">${checkMarkup}</ul>
         <div class="risk-summary-title">Risk Summary</div>
         <div class="risk-summary-body">${escapeHtml(riskSummary)}</div>
       </div>
 
-      <div class="panel-section ${highlightClass}" aria-label="Decision insight">
-        <div class="section-kicker">Section 2</div>
-        <div class="section-title">Decision Insight</div>
-        ${decisionBlock}
-      </div>
-
-      <div class="panel-section recommended-action-section" aria-label="Recommended action">
-        <div class="section-kicker">Section 3</div>
-        <div class="section-title">⚠ Recommended Action</div>
-        <div class="recommended-action-box">${escapeHtml(recommendedAction)}</div>
-      </div>
-
       <div class="panel-section" aria-label="Action controls">
         <div class="section-kicker">Section 4</div>
         <div class="section-title">CTA</div>
         <div class="btn-row">
-          <button class="btn-details" id="dpdp-toggle" aria-expanded="false">View Detailed Analysis</button>
-          <button class="btn-dismiss" id="dpdp-dismiss">Dismiss</button>
+          ${showCookieSettingsButton ? '<button class="btn-primary" id="dpdp-open-cookie-settings">Open Cookie Settings</button>' : ""}
+          <button class="btn-details" id="dpdp-toggle" aria-expanded="false">View Full Analysis</button>
         </div>
       </div>
 
@@ -396,14 +397,23 @@ function renderUnifiedOverlay({ mode, analysis, sourceUrl, risks = [], bannerCon
 
   const detailsEl = shadow.getElementById("dpdp-details");
   const toggleBtn = shadow.getElementById("dpdp-toggle");
+  const cookieBtn = shadow.getElementById("dpdp-open-cookie-settings");
 
   toggleBtn.addEventListener("click", () => {
     const isOpen = detailsEl.classList.toggle("open");
-    toggleBtn.textContent = isOpen ? "Hide Detailed Analysis" : "View Detailed Analysis";
+    toggleBtn.textContent = isOpen ? "Hide Full Analysis" : "View Full Analysis";
     toggleBtn.setAttribute("aria-expanded", String(isOpen));
   });
 
-  shadow.getElementById("dpdp-dismiss").addEventListener("click", closeOverlay);
+  if (cookieBtn) {
+    cookieBtn.addEventListener("click", () => {
+      const opened = openCookieSettingsOnPage();
+      if (!opened) {
+        cookieBtn.textContent = "Cookie Settings Not Found";
+        cookieBtn.disabled = true;
+      }
+    });
+  }
 }
 
 function buildPolicyCheckRows(analysis) {
@@ -421,31 +431,31 @@ function buildPolicyCheckRows(analysis) {
       icon: hasDataCollection ? "✓" : "✗",
       tone: hasDataCollection ? "good" : "bad",
       label: "Data Collection",
-      note: hasDataCollection ? `${formatArray(analysis?.data_types_collected)} are mentioned.` : "What data is collected is not clearly stated.",
+      note: hasDataCollection ? `${formatArray(analysis?.data_types_collected)} collected.` : "Collected data not clearly stated.",
     },
     {
       icon: hasPurposeLimitation ? "✓" : "✗",
       tone: hasPurposeLimitation ? "good" : "bad",
       label: "Purpose Limitation",
-      note: hasPurposeLimitation ? `${formatArray(analysis?.collection_purposes)} explain why the data is used.` : "Why the data is collected is not clearly explained.",
+      note: hasPurposeLimitation ? `${formatArray(analysis?.collection_purposes)} listed.` : "Purpose for collection is unclear.",
     },
     {
       icon: sharingDetected ? "⚠" : "✓",
       tone: sharingDetected ? "warn" : "good",
       label: "Third-party sharing",
-      note: sharingDetected ? `${analysis?.third_party_sharing || "Sharing is mentioned."}` : "No explicit third-party sharing was detected.",
+      note: sharingDetected ? "Third-party sharing is mentioned." : "No clear third-party sharing signal.",
     },
     {
       icon: retentionGap ? "✗" : "✓",
       tone: retentionGap ? "bad" : "good",
       label: "Retention gaps",
-      note: retentionGap ? "Retention period or deletion timing is unclear." : `${analysis?.retention_periods || "Retention details were found."}`,
+      note: retentionGap ? "Retention period is unclear." : "Retention period is specified.",
     },
     {
       icon: rightsGap ? "✗" : "✓",
       tone: rightsGap ? "bad" : "good",
       label: "User rights gaps",
-      note: rightsGap ? "Rights like withdrawal or erasure are not clearly outlined." : `${formatArray(analysis?.user_rights)} are described.`,
+      note: rightsGap ? "Deletion or withdrawal rights are unclear." : `${formatArray(analysis?.user_rights)} described.`,
     },
   ];
 }
@@ -489,15 +499,17 @@ function buildDetailedAnalysisMarkup(analysis, risks, mode) {
     : `<li class="detail-row"><div class="detail-copy"><div class="detail-note">No additional risks were generated.</div></div></li>`;
 
   return `
-    <div class="detail-grid" aria-label="Detailed analysis fields">
+    <div class="section-kicker">Additional Details</div>
+    <div class="section-title additional-title">Additional Details</div>
+    <div class="detail-stack" aria-label="Additional details list">
       ${dataRows.map((row) => `
-        <div class="detail-card">
-          <div class="detail-label">${escapeHtml(row.label)}</div>
-          <div class="detail-note">${escapeHtml(row.value)}</div>
+        <div class="detail-inline-row">
+          <div class="detail-inline-label">${escapeHtml(row.label)}</div>
+          <div class="detail-inline-value">${escapeHtml(row.value)}</div>
         </div>`).join("")}
     </div>
     <ul class="detail-data-list" aria-label="Detailed risk findings">${riskItems}</ul>
-    <div class="decision-note" style="margin-top:10px;">${mode === MODE.BANNER ? "Banner pages prioritize the decision layer first, while still keeping the analysis visible above." : "Policy pages always show both the analysis and the decision layer."}</div>
+    <div class="decision-note" style="margin-top:10px;">${mode === MODE.BANNER ? "Banner mode keeps action and decision layers in focus." : "Policy mode keeps full context while prioritizing action first."}</div>
   `;
 }
 
@@ -509,20 +521,27 @@ function buildDecisionInsightBlock({ mode, analysis, risks, bannerContext }) {
 
   if (mode === MODE.BANNER) {
     return `
-      <div class="decision-lead">${context.cookieSettingsDetected ? "Cookie controls are visible, so you can narrow consent before proceeding." : "Cookie controls were detected, so this page still has an actionable consent path."}</div>
+      <div class="decision-lead">⚠ If you continue on this site:</div>
       <ul class="decision-list" aria-label="Banner decision consequences">
         <li class="decision-item">
-          <span class="decision-icon warn" aria-hidden="true">⚠</span>
+          <span class="decision-icon warn" aria-hidden="true">✗</span>
           <div class="decision-copy">
-            <div class="decision-label">Accept All</div>
-            <div class="decision-note">Usually enables broader tracking, more third-party sharing, and weaker control over optional cookies.</div>
+            <div class="decision-label">Third-party sharing</div>
+            <div class="decision-note">Your data may be shared with third parties.</div>
           </div>
         </li>
         <li class="decision-item">
-          <span class="decision-icon good" aria-hidden="true">✓</span>
+          <span class="decision-icon bad" aria-hidden="true">✗</span>
           <div class="decision-copy">
-            <div class="decision-label">Reject All</div>
-            <div class="decision-note">Limits optional tracking, but some essential cookies may still be used for the site to function.</div>
+            <div class="decision-label">Longer retention risk</div>
+            <div class="decision-note">Your data may be retained longer than expected.</div>
+          </div>
+        </li>
+        <li class="decision-item">
+          <span class="decision-icon ${context.cookieSettingsDetected ? "warn" : "bad"}" aria-hidden="true">${context.cookieSettingsDetected ? "⚠" : "✗"}</span>
+          <div class="decision-copy">
+            <div class="decision-label">Control may be limited</div>
+            <div class="decision-note">You may have limited control over deletion or withdrawal.</div>
           </div>
         </li>
       </ul>
@@ -531,27 +550,27 @@ function buildDecisionInsightBlock({ mode, analysis, risks, bannerContext }) {
   }
 
   return `
-    <div class="decision-lead">By using this site, you may be consenting to:</div>
+    <div class="decision-lead">⚠ If you continue on this site:</div>
     <ul class="decision-list" aria-label="Policy decision consequences">
       <li class="decision-item">
-        <span class="decision-icon ${sharingRisk ? "warn" : "good"}" aria-hidden="true">${sharingRisk ? "⚠" : "✓"}</span>
+        <span class="decision-icon ${sharingRisk ? "bad" : "good"}" aria-hidden="true">${sharingRisk ? "✗" : "✓"}</span>
         <div class="decision-copy">
           <div class="decision-label">Third-party sharing</div>
-          <div class="decision-note">Data may be shared with vendors, partners, or service providers outside the site.</div>
+          <div class="decision-note">Your data may be shared with third parties.</div>
         </div>
       </li>
       <li class="decision-item">
         <span class="decision-icon ${retentionGap ? "bad" : "good"}" aria-hidden="true">${retentionGap ? "✗" : "✓"}</span>
         <div class="decision-copy">
-          <div class="decision-label">Unclear retention</div>
-          <div class="decision-note">If retention is vague, your data may stay longer than you expect or can easily justify.</div>
+          <div class="decision-label">Longer retention risk</div>
+          <div class="decision-note">Your data may be retained longer than expected.</div>
         </div>
       </li>
       <li class="decision-item">
         <span class="decision-icon ${rightsGap ? "bad" : "good"}" aria-hidden="true">${rightsGap ? "✗" : "✓"}</span>
         <div class="decision-copy">
-          <div class="decision-label">Limited control</div>
-          <div class="decision-note">Missing rights language can make withdrawal, erasure, or correction harder to exercise.</div>
+          <div class="decision-label">Control may be limited</div>
+          <div class="decision-note">You may have limited control over deletion or withdrawal.</div>
         </div>
       </li>
     </ul>
@@ -585,7 +604,22 @@ function buildRecommendedActionTextFromRisks(risks) {
     return "Avoid 'Accept All Cookies'. Use 'Cookie Settings' to disable advertising and analytics cookies.";
   }
 
-  return "Minimal risk detected. You can proceed, but review settings if needed.";
+  return "Minimal risk detected. You may proceed, but review cookie settings if needed.";
+}
+
+function openCookieSettingsOnPage() {
+  const elements = document.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']");
+  const keywords = /(cookie settings|cookie preferences|manage cookies|manage preferences|privacy settings|customi[sz]e|preferences)/i;
+
+  for (const el of elements) {
+    const text = [el.innerText, el.textContent, el.getAttribute("aria-label"), el.getAttribute("title"), el.value].filter(Boolean).join(" ");
+    if (!keywords.test(text)) continue;
+    if (!isVisible(el)) continue;
+    el.click();
+    return true;
+  }
+
+  return false;
 }
 
 function closeOverlay() {
@@ -616,7 +650,7 @@ function setupOverlayDrag(handleEl) {
   const host = document.getElementById(OVERLAY_ID);
   if (!host) return;
 
-  const dragState = { isDragging: false, offsetX: 0, offsetY: 0 };
+  const dragState = { isDragging: false, offsetX: 0, startTop: 0 };
 
   const onMouseDown = (event) => {
     if (event.button !== 0) return;
@@ -630,14 +664,37 @@ function setupOverlayDrag(handleEl) {
 
     dragState.isDragging = true;
     dragState.offsetX = event.clientX - rect.left;
-    dragState.offsetY = event.clientY - rect.top;
+    dragState.startTop = rect.top;
     document.body.style.userSelect = "none";
   };
 
   const onMouseMove = (event) => {
     if (!dragState.isDragging) return;
-    host.style.left = `${event.clientX - dragState.offsetX}px`;
-    host.style.top = `${event.clientY - dragState.offsetY}px`;
+
+    let left = event.clientX - dragState.offsetX;
+    let top = dragState.startTop;
+
+    const hostRect = host.getBoundingClientRect();
+
+    const panelHeight = hostRect.height;
+    const viewportHeight = window.innerHeight;
+
+    let maxTop = viewportHeight - panelHeight;
+
+    // If panel is taller than viewport, keep it anchored at the top.
+    if (panelHeight > viewportHeight) {
+      maxTop = 0;
+    }
+
+    top = Math.min(Math.max(0, top), maxTop);
+
+    const panelWidth = hostRect.width;
+    const viewportWidth = window.innerWidth;
+    const maxLeft = Math.max(0, viewportWidth - panelWidth);
+    left = Math.min(Math.max(0, left), maxLeft);
+
+    host.style.left = `${left}px`;
+    host.style.top = `${top}px`;
   };
 
   const onMouseUp = () => {
@@ -693,12 +750,18 @@ function getBaseStyles() {
       font-size: 13px;
       line-height: 1.5;
     }
+    #dpdp-panel {
+      max-height: 90vh;
+      overflow-y: auto;
+    }
     .header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
     .title { font-size: 14px; font-weight: bold; color: #fff; }
     .btn-row { display: flex; gap: 8px; }
     button { flex: 1; padding: 7px 10px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
     .btn-details { background: #2d2d4e; color: #e0e0e0; }
     .btn-details:hover { background: #3d3d6e; }
+    .btn-primary { background: #f0a531; color: #1a1a2e; }
+    .btn-primary:hover { background: #ffc266; }
     .btn-dismiss { background: transparent; color: #8f95b8; border: 1px solid #2d2d4e; opacity: 0.82; }
     .btn-dismiss:hover { background: rgba(255,255,255,0.03); color: #cfd3ea; }
     .consent-label { font-size: 10px; color: #7c83fd; margin-bottom: 6px; letter-spacing: 0.3px; opacity: 0.85; }
@@ -727,6 +790,10 @@ function getBaseStyles() {
       border-color: rgba(255, 196, 76, 0.28);
       background: linear-gradient(180deg, rgba(52, 44, 20, 0.32), rgba(20, 18, 12, 0.2));
       box-shadow: inset 0 0 0 1px rgba(255, 196, 76, 0.06);
+    }
+    .decision-section {
+      border-color: rgba(255, 122, 89, 0.28);
+      background: linear-gradient(180deg, rgba(46, 26, 24, 0.34), rgba(16, 14, 20, 0.22));
     }
     .recommended-action-box {
       color: #f4e8c2;
@@ -780,6 +847,23 @@ function getBaseStyles() {
     .detail-card .detail-label { margin-bottom: 4px; }
     .details-section { display: none; margin-top: 10px; }
     .details-section.open { display: block; }
+    .details-section {
+      border: 1px solid #242844;
+      border-radius: 10px;
+      padding: 10px;
+      background: rgba(10, 12, 24, 0.62);
+      opacity: 0.9;
+    }
+    .additional-title { font-size: 13px; color: #b8bfeb; margin-bottom: 6px; }
+    .detail-stack { display: grid; gap: 6px; margin-bottom: 8px; }
+    .detail-inline-row {
+      border: 1px solid #242844;
+      border-radius: 8px;
+      background: rgba(13, 15, 28, 0.8);
+      padding: 8px;
+    }
+    .detail-inline-label { font-size: 11px; color: #8f95b8; margin-bottom: 2px; }
+    .detail-inline-value { font-size: 11px; color: #d2d6f3; line-height: 1.35; }
     .policy-link { font-size: 10px; color: #7c83fd; word-break: break-all; margin-top: 4px; }
     .loading { text-align: center; padding: 12px 0; color: #aaa; font-size: 12px; }
     .spinner {
