@@ -12,6 +12,7 @@ let pageFlowInitialized = false;
 let activeMode = "DEFAULT_MODE";
 let modeRecheckObserverActive = false;
 let modeRecheckTimer = null;
+let overlayDragCleanup = null;
 
 const MODE = {
   POLICY: "POLICY_MODE",
@@ -75,7 +76,13 @@ function runPolicyAnalysis() {
   pageRunCache.add(pageUrl);
 
   const policyText = extractVisiblePolicyText();
-  if (!policyText) return;
+  const fallbackAnalysis = createPolicyPageFallbackAnalysis(policyText || (document.body?.innerText || ""), pageUrl);
+
+  if (!policyText) {
+    console.warn("[DPDP] Policy page text was too short for remote analysis. Using local fallback insights.");
+    showPolicyModeOverlay(fallbackAnalysis, pageUrl);
+    return;
+  }
 
   chrome.runtime.sendMessage(
     {
@@ -86,12 +93,13 @@ function runPolicyAnalysis() {
     (response) => {
       if (chrome.runtime.lastError) {
         console.error("[DPDP] Policy mode message error:", chrome.runtime.lastError.message);
-        showPolicyModeErrorOverlay("Policy analysis could not be completed on this page.");
+        showPolicyModeOverlay(fallbackAnalysis, pageUrl);
         return;
       }
 
       if (!response || !response.success || !response.analysis) {
-        showPolicyModeErrorOverlay("Policy analysis could not be completed on this page.");
+        console.warn("[DPDP] Policy analysis fallback engaged for:", pageUrl);
+        showPolicyModeOverlay(fallbackAnalysis, pageUrl);
         return;
       }
 
@@ -132,17 +140,12 @@ function showNoConsent() {
 
 function isPolicyPage() {
   const url = window.location.href.toLowerCase();
-  const urlMatch =
-    url.includes("privacy") ||
-    url.includes("policy") ||
-    url.includes("terms");
+  const urlMatch = url.includes("privacy") || url.includes("policy");
 
   const headings = Array.from(document.querySelectorAll("h1, h2, h3"))
     .map((el) => (el.innerText || "").toLowerCase());
 
-  const headingMatch = headings.some((h) =>
-    h.includes("privacy policy") || h.includes("cookie policy")
-  );
+  const headingMatch = headings.some((h) => h.includes("privacy policy"));
 
   const fullTextMatch = (document.body?.innerText || "")
     .toLowerCase()
@@ -410,16 +413,18 @@ function mapRisks(analysis) {
 
 // ─── UI Overlay (Shadow DOM) ──────────────────────────────────────────────────
 
-const OVERLAY_ID = "dpdp-warning-host";
+const OVERLAY_ID = "dpdp-agent";
 
 function createShadowHost() {
+  cleanupOverlayDrag();
+
   // Remove any existing overlay
   const existing = document.getElementById(OVERLAY_ID);
   if (existing) existing.remove();
 
   const host = document.createElement("div");
   host.id = OVERLAY_ID;
-  host.style.cssText = "all: initial; position: fixed; z-index: 2147483647; bottom: 20px; right: 20px; max-width: 380px; font-family: sans-serif;";
+  host.style.cssText = "all: initial; position: fixed; z-index: 2147483647; left: 20px; top: 20px; right: auto; bottom: auto; max-width: 380px; font-family: sans-serif; cursor: move;";
   document.body.appendChild(host);
 
   const shadow = host.attachShadow({ mode: "closed" });
@@ -429,6 +434,25 @@ function createShadowHost() {
 function getBaseStyles() {
   return `
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    .drag-handle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 0 8px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid #2d2d4e;
+      cursor: move;
+      user-select: none;
+      color: #888;
+      font-size: 10px;
+      letter-spacing: 0.3px;
+    }
+    .drag-grip {
+      color: #7c83fd;
+      font-size: 12px;
+      line-height: 1;
+    }
     .card {
       background: #1a1a2e;
       color: #e0e0e0;
@@ -580,6 +604,7 @@ function showLoadingOverlay(bannerEl) {
     <style>${getBaseStyles()}</style>
     <div class="consent-label" aria-label="Consent request detected">🔍 Consent request detected</div>
     <div class="card" role="status" aria-live="polite">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag to move</span></div>
       <div class="header">
         <span class="logo">🛡️</span>
         <span class="title">DPDP Privacy Agent</span>
@@ -590,6 +615,8 @@ function showLoadingOverlay(bannerEl) {
       </div>
     </div>
   `;
+
+  setupOverlayDrag(shadow, shadow.getElementById("dpdp-drag-handle"));
 }
 
 function showErrorOverlay(bannerEl, errorMsg) {
@@ -600,6 +627,7 @@ function showErrorOverlay(bannerEl, errorMsg) {
     <style>${getBaseStyles()}</style>
     <div class="consent-label">🔍 Consent request detected</div>
     <div class="card" role="alert">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag to move</span></div>
       <div class="header">
         <span class="logo">🛡️</span>
         <span class="title">DPDP Privacy Agent</span>
@@ -611,7 +639,10 @@ function showErrorOverlay(bannerEl, errorMsg) {
     </div>
   `;
 
+  setupOverlayDrag(shadow, shadow.getElementById("dpdp-drag-handle"));
+
   shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    cleanupOverlayDrag();
     document.getElementById(OVERLAY_ID)?.remove();
     overlayInjected = false;
   });
@@ -625,6 +656,7 @@ function showPolicyModeLoadingOverlay(pageUrl) {
     <style>${getBaseStyles()}</style>
     <div class="consent-label">Policy Analysis</div>
     <div class="card" role="status" aria-live="polite">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag to move</span></div>
       <div class="header">
         <span class="logo">📄</span>
         <span class="title">Policy Analysis</span>
@@ -636,6 +668,8 @@ function showPolicyModeLoadingOverlay(pageUrl) {
       <div class="policy-link">Source: ${escapeHtml(truncate(pageUrl, 72))}</div>
     </div>
   `;
+
+  setupOverlayDrag(shadow, shadow.getElementById("dpdp-drag-handle"));
 }
 
 function showPolicyModeErrorOverlay(errorMsg) {
@@ -646,6 +680,7 @@ function showPolicyModeErrorOverlay(errorMsg) {
     <style>${getBaseStyles()}</style>
     <div class="consent-label">Policy Analysis</div>
     <div class="card" role="alert">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag to move</span></div>
       <div class="header">
         <span class="logo">📄</span>
         <span class="title">Policy Analysis</span>
@@ -657,7 +692,10 @@ function showPolicyModeErrorOverlay(errorMsg) {
     </div>
   `;
 
+  setupOverlayDrag(shadow, shadow.getElementById("dpdp-drag-handle"));
+
   shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    cleanupOverlayDrag();
     document.getElementById(OVERLAY_ID)?.remove();
     overlayInjected = false;
   });
@@ -688,6 +726,7 @@ function showPolicyModeOverlay(analysis, pageUrl) {
     <style>${getBaseStyles()}</style>
     <div class="consent-label">Policy Analysis</div>
     <div class="card" role="dialog" aria-label="Policy Analysis Results">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag to move</span></div>
       <div class="header">
         <span class="logo">📄</span>
         <span class="title">Policy Analysis</span>
@@ -713,6 +752,8 @@ function showPolicyModeOverlay(analysis, pageUrl) {
     </div>
   `;
 
+  setupOverlayDrag(shadow, shadow.getElementById("dpdp-drag-handle"));
+
   const detailsEl = shadow.getElementById("dpdp-policy-details");
   const toggleBtn = shadow.getElementById("dpdp-policy-toggle");
 
@@ -723,6 +764,7 @@ function showPolicyModeOverlay(analysis, pageUrl) {
   });
 
   shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    cleanupOverlayDrag();
     document.getElementById(OVERLAY_ID)?.remove();
     overlayInjected = false;
   });
@@ -812,6 +854,7 @@ function showRiskOverlay(bannerEl, risks, policyUrl, isFallback, analysis, banne
     <style>${getBaseStyles()}</style>
     <div class="consent-label">🔍 Consent request detected</div>
     <div class="card" role="dialog" aria-label="DPDP Privacy Risk Warning">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag to move</span></div>
       <div class="header">
         <span class="logo">🛡️</span>
         <span class="title">DPDP Privacy Agent</span>
@@ -836,6 +879,8 @@ function showRiskOverlay(bannerEl, risks, policyUrl, isFallback, analysis, banne
     </div>
   `;
 
+  setupOverlayDrag(shadow, shadow.getElementById("dpdp-drag-handle"));
+
   const detailsEl = shadow.getElementById("dpdp-details");
   const toggleBtn = shadow.getElementById("dpdp-toggle");
 
@@ -846,9 +891,127 @@ function showRiskOverlay(bannerEl, risks, policyUrl, isFallback, analysis, banne
   });
 
   shadow.getElementById("dpdp-dismiss").addEventListener("click", () => {
+    cleanupOverlayDrag();
     document.getElementById(OVERLAY_ID)?.remove();
     overlayInjected = false;
   });
+}
+
+function setupOverlayDrag(shadow, handleEl) {
+  cleanupOverlayDrag();
+
+  if (!handleEl) return;
+
+  const host = document.getElementById(OVERLAY_ID);
+  if (!host) return;
+
+  const dragState = {
+    isDragging: false,
+    offsetX: 0,
+    offsetY: 0,
+  };
+
+  const onMouseDown = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+
+    const rect = host.getBoundingClientRect();
+    host.style.left = `${rect.left}px`;
+    host.style.top = `${rect.top}px`;
+    host.style.right = "auto";
+    host.style.bottom = "auto";
+
+    dragState.isDragging = true;
+    dragState.offsetX = event.clientX - rect.left;
+    dragState.offsetY = event.clientY - rect.top;
+    document.body.style.userSelect = "none";
+  };
+
+  const onMouseMove = (event) => {
+    if (!dragState.isDragging) return;
+
+    host.style.left = `${event.clientX - dragState.offsetX}px`;
+    host.style.top = `${event.clientY - dragState.offsetY}px`;
+  };
+
+  const onMouseUp = () => {
+    dragState.isDragging = false;
+    document.body.style.userSelect = "";
+  };
+
+  handleEl.addEventListener("mousedown", onMouseDown);
+  document.addEventListener("mousemove", onMouseMove);
+  document.addEventListener("mouseup", onMouseUp);
+
+  overlayDragCleanup = () => {
+    handleEl.removeEventListener("mousedown", onMouseDown);
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    document.body.style.userSelect = "";
+    dragState.isDragging = false;
+  };
+}
+
+function cleanupOverlayDrag() {
+  if (overlayDragCleanup) {
+    overlayDragCleanup();
+    overlayDragCleanup = null;
+  }
+}
+
+function createPolicyPageFallbackAnalysis(policyText, pageUrl) {
+  const text = String(policyText || "").toLowerCase();
+  const headings = Array.from(document.querySelectorAll("h1, h2, h3"))
+    .map((el) => (el.innerText || "").toLowerCase())
+    .join(" ");
+  const combined = `${text} ${headings} ${String(pageUrl || window.location.href).toLowerCase()}`;
+
+  return {
+    data_types_collected: collectHeuristicMatches(combined, [
+      ["email", /\bemail\b/],
+      ["name", /\bname\b/],
+      ["phone", /\b(phone|mobile|telephone)\b/],
+      ["address", /\b(address|location)\b/],
+      ["payment", /\b(card|payment|billing)\b/],
+      ["device info", /\b(device|browser|ip address|cookie id)\b/],
+    ]),
+    collection_purposes: collectHeuristicMatches(combined, [
+      ["service delivery", /\b(provide|deliver|operate)\b/],
+      ["account management", /\b(account|registration|login)\b/],
+      ["analytics", /\b(analytics|measure|improve)\b/],
+      ["marketing", /\b(marketing|promotion|advertising)\b/],
+      ["support", /\b(support|assist|customer service)\b/],
+      ["security", /\b(security|fraud|abuse|protect)\b/],
+    ]),
+    retention_periods: extractHeuristicSentence(combined, [/retain/, /retention/, /store for/, /kept for/, /keep your data/]),
+    third_party_sharing: extractHeuristicSentence(combined, [/third\s*party/, /share/, /partners/, /service providers/, /vendors/]),
+    consent_mechanism: extractHeuristicSentence(combined, [/consent/, /agree/, /accept/, /opt\s*out/, /opt\s*in/]),
+    user_rights: collectHeuristicMatches(combined, [
+      ["access", /\b(access|obtain a copy)\b/],
+      ["deletion", /\b(delete|erasure|erase|remove)\b/],
+      ["correction", /\b(correct|rectif)\b/],
+      ["withdraw consent", /\b(withdraw|revoke)\b/],
+      ["complaint", /\b(grievance|complaint|authority)\b/],
+    ]),
+  };
+}
+
+function collectHeuristicMatches(text, items) {
+  const matched = [];
+  for (const [label, pattern] of items) {
+    if (pattern.test(text)) matched.push(label);
+  }
+  return matched;
+}
+
+function extractHeuristicSentence(text, patterns) {
+  const sentences = text.match(/[^.!?]+[.!?]?/g) || [text];
+  for (const sentence of sentences) {
+    if (patterns.some((pattern) => pattern.test(sentence))) {
+      return sentence.trim();
+    }
+  }
+  return "";
 }
 
 function buildRecommendationBlock({ risks, analysis, bannerContext }) {
