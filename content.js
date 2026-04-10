@@ -23,6 +23,36 @@ const OVERLAY_ID = "dpdp-agent";
 const POLICY_MODE_MAX_CHARS = 10000;
 const CONSENT_KEYWORDS = ["cookie", "privacy", "consent", "accept", "agree", "gdpr", "data protection", "terms"];
 const POLICY_LINK_KEYWORDS = ["privacy policy", "privacy notice", "data protection", "privacy statement"];
+const DECISION_STATUS = {
+  CLEAR: "CLEAR",
+  RISK: "RISK",
+  GAP: "GAP",
+};
+const RELEVANCE_KEYWORDS = [
+  "data",
+  "personal data",
+  "information",
+  "collect",
+  "process",
+  "retain",
+  "store",
+  "delete",
+  "retention",
+  "period",
+  "share",
+  "third party",
+  "partner",
+  "disclose",
+  "transfer",
+  "access",
+  "correct",
+  "erase",
+  "withdraw",
+  "rights",
+];
+const SHARING_SENTENCE_PATTERN = /\b(share|third\s*party|disclose)\b/i;
+const RETENTION_SENTENCE_PATTERN = /\b(retain|store|delete|period)\b/i;
+const RIGHTS_SENTENCE_PATTERN = /\b(access|erase|withdraw|rights)\b/i;
 
 console.log("[DPDP] content.js loaded on:", window.location.href);
 
@@ -263,35 +293,151 @@ function resolveUrl(href) {
 }
 
 function analyzeText(text) {
-  const normalized = String(text || "").toLowerCase();
+  const fullText = String(text || "");
+  const relevantSentences = extractRelevantAnalysisSentences(fullText);
+  const relevantText = relevantSentences.join(" ");
+  const normalized = relevantText.toLowerCase();
+
+  const dataTypes = collectHeuristicMatches(normalized, [
+    ["email", /\bemail\b/],
+    ["name", /\bname\b/],
+    ["phone", /\b(phone|mobile|telephone)\b/],
+    ["address", /\b(address|location)\b/],
+    ["payment", /\b(card|payment|billing)\b/],
+    ["device info", /\b(device|browser|ip address|cookie id)\b/],
+  ]);
+
+  const purposes = collectHeuristicMatches(normalized, [
+    ["service delivery", /\b(provide|deliver|operate)\b/],
+    ["account management", /\b(account|registration|login)\b/],
+    ["analytics", /\b(analytics|measure|improve)\b/],
+    ["marketing", /\b(marketing|promotion|advertising)\b/],
+    ["support", /\b(support|assist|customer service)\b/],
+    ["security", /\b(security|fraud|abuse|protect)\b/],
+  ]);
+
+  const rights = collectHeuristicMatches(normalized, [
+    ["access", /\b(access|obtain a copy)\b/],
+    ["deletion", /\b(delete|erasure|erase|remove)\b/],
+    ["correction", /\b(correct|rectif|update)\b/],
+    ["withdraw consent", /\b(withdraw|revoke|opt\s*out)\b/],
+    ["complaint", /\b(grievance|complaint|authority|board)\b/],
+  ]);
+
+  const retentionSentence = extractCategorySentence(relevantSentences, RETENTION_SENTENCE_PATTERN) || "Not mentioned";
+  const sharingSentence = extractCategorySentence(relevantSentences, SHARING_SENTENCE_PATTERN) || "Not mentioned";
+  const consentSentence = extractHeuristicSentence(normalized, [/consent/, /agree/, /accept/, /opt\s*out/, /opt\s*in/, /pre-ticked/, /checkbox/]);
+  const rightsFiltered = extractCategorySentence(relevantSentences, RIGHTS_SENTENCE_PATTERN);
+  const finalRights = rightsFiltered ? rights : [];
+
+  const decision = evaluateDpdpDecision({
+    text: normalized,
+    dataTypes,
+    purposes,
+    rights: finalRights,
+    retentionSentence,
+    sharingSentence,
+    consentSentence,
+  });
 
   return {
-    data_types_collected: collectHeuristicMatches(normalized, [
-      ["email", /\bemail\b/],
-      ["name", /\bname\b/],
-      ["phone", /\b(phone|mobile|telephone)\b/],
-      ["address", /\b(address|location)\b/],
-      ["payment", /\b(card|payment|billing)\b/],
-      ["device info", /\b(device|browser|ip address|cookie id)\b/],
-    ]),
-    collection_purposes: collectHeuristicMatches(normalized, [
-      ["service delivery", /\b(provide|deliver|operate)\b/],
-      ["account management", /\b(account|registration|login)\b/],
-      ["analytics", /\b(analytics|measure|improve)\b/],
-      ["marketing", /\b(marketing|promotion|advertising)\b/],
-      ["support", /\b(support|assist|customer service)\b/],
-      ["security", /\b(security|fraud|abuse|protect)\b/],
-    ]),
-    retention_periods: extractHeuristicSentence(normalized, [/retain/, /retention/, /store for/, /kept for/, /keep your data/]),
-    third_party_sharing: extractHeuristicSentence(normalized, [/third\s*party/, /share/, /partners/, /service providers/, /vendors/]),
-    consent_mechanism: extractHeuristicSentence(normalized, [/consent/, /agree/, /accept/, /opt\s*out/, /opt\s*in/]),
-    user_rights: collectHeuristicMatches(normalized, [
-      ["access", /\b(access|obtain a copy)\b/],
-      ["deletion", /\b(delete|erasure|erase|remove)\b/],
-      ["correction", /\b(correct|rectif)\b/],
-      ["withdraw consent", /\b(withdraw|revoke)\b/],
-      ["complaint", /\b(grievance|complaint|authority)\b/],
-    ]),
+    data_types_collected: dataTypes,
+    collection_purposes: purposes,
+    retention_periods: retentionSentence,
+    third_party_sharing: sharingSentence,
+    consent_mechanism: consentSentence,
+    user_rights: finalRights,
+    dpdp_decision: decision,
+  };
+}
+
+function extractRelevantAnalysisSentences(text) {
+  const sentences = splitIntoSentences(text);
+  const relevantPattern = new RegExp(`\\b(${RELEVANCE_KEYWORDS.map((word) => word.replace(/\s+/g, "\\\\s*")).join("|")})\\b`, "i");
+  return sentences.filter((sentence) => relevantPattern.test(sentence));
+}
+
+function splitIntoSentences(text) {
+  return String(text || "").match(/[^.!?]+[.!?]?/g)?.map((sentence) => sentence.trim()).filter(Boolean) || [];
+}
+
+function extractCategorySentence(sentences, categoryPattern) {
+  for (const sentence of sentences) {
+    if (categoryPattern.test(sentence)) return sentence.trim();
+  }
+  return "";
+}
+
+function evaluateDpdpDecision({ text, dataTypes, purposes, rights, retentionSentence, sharingSentence, consentSentence }) {
+  const hasDataTypes = dataTypes.length > 0;
+  const hasPurposes = purposes.length > 0;
+  const hasRightsGuidance = rights.length > 0 && /\b(request|portal|contact|email|form|grievance|board)\b/.test(text);
+
+  const noticeScore = (hasDataTypes ? 1 : 0) + (hasPurposes ? 1 : 0) + (hasRightsGuidance ? 1 : 0);
+  const noticeStatus = noticeScore === 3 ? DECISION_STATUS.CLEAR : noticeScore >= 1 ? DECISION_STATUS.RISK : DECISION_STATUS.GAP;
+
+  const bundledConsent = /\b(accept all|blanket consent|any purpose|all purposes|by using.*you agree)\b/.test(text);
+  const vagueConsent = /\b(improve user experience|as needed|as applicable|from time to time)\b/.test(consentSentence);
+  const hasConsentSignal = Boolean(consentSentence);
+  const consentStatus = !hasConsentSignal
+    ? DECISION_STATUS.GAP
+    : bundledConsent || vagueConsent || !hasPurposes
+      ? DECISION_STATUS.RISK
+      : DECISION_STATUS.CLEAR;
+
+  const rightsSet = new Set(rights);
+  const requiredRights = ["access", "correction", "deletion", "withdraw consent"];
+  const missingRights = requiredRights.filter((item) => !rightsSet.has(item));
+  const rightsStatus = missingRights.length === 0 ? DECISION_STATUS.CLEAR : DECISION_STATUS.GAP;
+
+  const retentionMissing = !retentionSentence || /^not mentioned$/i.test(retentionSentence);
+  const retentionVague = /\b(not specified|not mentioned|unclear|as long as necessary|indefinite)\b/.test(retentionSentence);
+  const storageStatus = retentionMissing ? DECISION_STATUS.GAP : retentionVague ? DECISION_STATUS.RISK : DECISION_STATUS.CLEAR;
+
+  const sharingMissing = !sharingSentence || /^not mentioned$/i.test(sharingSentence);
+  const sharingPurposeClear = hasPurposes && /\bfor|purpose|to\b/.test(sharingSentence);
+  const sharingUnclear = !sharingMissing && !sharingPurposeClear;
+  const sharingStatus = sharingMissing ? DECISION_STATUS.GAP : sharingUnclear ? DECISION_STATUS.RISK : DECISION_STATUS.CLEAR;
+
+  return {
+    notice_requirements: {
+      status: noticeStatus,
+      reason: noticeStatus === DECISION_STATUS.CLEAR
+        ? "Notice includes data types, purpose, and rights mechanism."
+        : noticeStatus === DECISION_STATUS.RISK
+          ? "Notice is partial; one or more required notice elements are unclear."
+          : "Notice is missing required elements: data types, purpose, or rights mechanism.",
+    },
+    consent_validity: {
+      status: consentStatus,
+      reason: consentStatus === DECISION_STATUS.CLEAR
+        ? "Consent appears specific and clearly explained."
+        : consentStatus === DECISION_STATUS.RISK
+          ? "Consent language appears vague or bundled."
+          : "No clear consent mechanism identified.",
+    },
+    user_rights: {
+      status: rightsStatus,
+      reason: rightsStatus === DECISION_STATUS.CLEAR
+        ? "Access, correction, erasure, and withdrawal rights are present."
+        : `Missing rights signals: ${missingRights.join(", ") || "required user rights"}.`,
+    },
+    storage_limitation: {
+      status: storageStatus,
+      reason: storageStatus === DECISION_STATUS.CLEAR
+        ? "Retention period appears defined."
+        : storageStatus === DECISION_STATUS.RISK
+          ? "Retention language is present but unclear."
+          : "Retention period is not defined.",
+    },
+    third_party_sharing: {
+      status: sharingStatus,
+      reason: sharingStatus === DECISION_STATUS.CLEAR
+        ? "Third-party sharing is disclosed with purpose context."
+        : sharingStatus === DECISION_STATUS.RISK
+          ? "Third-party sharing is mentioned but purpose is unclear."
+          : "Third-party sharing disclosure is not found.",
+    },
   };
 }
 
@@ -327,11 +473,19 @@ function extractRelevantPolicyText() {
       seen.add(element);
 
       const text = (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
-      if (text.length >= 100) chunks.push(text);
+      if (text.length >= 100) {
+        const focused = prioritizePolicySentences(text);
+        if (focused.length >= 100) chunks.push(focused);
+      }
     }
   }
 
   return chunks.join("\n\n").slice(0, POLICY_MODE_MAX_CHARS).trim();
+}
+
+function prioritizePolicySentences(text) {
+  const focused = extractRelevantAnalysisSentences(text);
+  return focused.join(" ").replace(/\s+/g, " ").trim();
 }
 
 function extractBannerContext(bannerEl) {
@@ -355,6 +509,38 @@ function extractBannerContext(bannerEl) {
 function mapRisks(analysis) {
   const risks = [];
   if (!analysis) return risks;
+
+  const decision = analysis.dpdp_decision || {};
+
+  if (decision.storage_limitation?.status === DECISION_STATUS.GAP) {
+    risks.push({ level: "High", principle: "Storage Limitation", message: "Data retention period not specified. Under DPDP, data must not be kept longer than necessary." });
+  } else if (decision.storage_limitation?.status === DECISION_STATUS.RISK) {
+    risks.push({ level: "Medium", principle: "Storage Limitation", message: "Data retention language is unclear. Verify storage duration and deletion conditions." });
+  }
+
+  if (decision.third_party_sharing?.status === DECISION_STATUS.RISK) {
+    risks.push({ level: "Medium", principle: "Purpose Limitation", message: "Third-party data sharing detected. Verify if sharing aligns with the stated collection purpose." });
+  } else if (decision.third_party_sharing?.status === DECISION_STATUS.GAP) {
+    risks.push({ level: "Medium", principle: "Purpose Limitation", message: "Third-party sharing disclosure is missing. Verify whether data is shared and for what purpose." });
+  }
+
+  if (decision.consent_validity?.status === DECISION_STATUS.RISK || decision.consent_validity?.status === DECISION_STATUS.GAP) {
+    risks.push({ level: "Medium", principle: "Lawful Consent", message: "Consent mechanism is unclear or vague. DPDP requires free, specific, informed, and unambiguous consent." });
+  }
+
+  if (decision.user_rights?.status === DECISION_STATUS.GAP) {
+    risks.push({ level: "High", principle: "User Rights", message: "No user rights mentioned (e.g., right to withdraw consent, erasure). DPDP mandates these rights." });
+  }
+
+  if (decision.notice_requirements?.status === DECISION_STATUS.GAP) {
+    risks.push({ level: "High", principle: "Transparency", message: "Data collection purposes not stated. DPDP requires clear disclosure of why data is collected." });
+  }
+
+  if (decision.notice_requirements?.status === DECISION_STATUS.RISK) {
+    risks.push({ level: "Medium", principle: "Data Minimization", message: "Types of data collected are not clearly specified. Transparency about collected data is required under DPDP." });
+  }
+
+  if (risks.length > 0) return dedupeRisks(risks);
 
   if (!analysis.retention_periods || analysis.retention_periods.trim() === "") {
     risks.push({ level: "High", principle: "Storage Limitation", message: "Data retention period not specified. Under DPDP, data must not be kept longer than necessary." });
@@ -382,6 +568,16 @@ function mapRisks(analysis) {
   }
 
   return risks;
+}
+
+function dedupeRisks(risks) {
+  const seen = new Set();
+  return risks.filter((risk) => {
+    const key = `${risk.level}|${risk.principle}|${risk.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function getFallbackRisks() {
@@ -504,45 +700,54 @@ function renderUnifiedOverlay({ mode, analysis, sourceUrl, risks = [], bannerCon
 }
 
 function buildPolicyCheckRows(analysis) {
-  const hasDataCollection = Array.isArray(analysis?.data_types_collected) && analysis.data_types_collected.length > 0;
-  const hasPurposeLimitation = Array.isArray(analysis?.collection_purposes) && analysis.collection_purposes.length > 0;
-  const sharingText = String(analysis?.third_party_sharing || "").toLowerCase().trim();
-  const sharingDetected = Boolean(sharingText) && !/(none|not shared|no third party|not applicable|does not share|no sharing)/.test(sharingText);
-  const retentionText = String(analysis?.retention_periods || "").toLowerCase().trim();
-  const retentionGap = !retentionText || /(not specified|unknown|n\/?a|none|not mentioned|unclear|vague)/.test(retentionText);
-  const rightsCount = Array.isArray(analysis?.user_rights) ? analysis.user_rights.length : 0;
-  const rightsGap = rightsCount === 0;
+  const decision = analysis?.dpdp_decision || {};
+
+  const noticeStatus = decision.notice_requirements?.status || DECISION_STATUS.GAP;
+  const consentStatus = decision.consent_validity?.status || DECISION_STATUS.GAP;
+  const sharingStatus = decision.third_party_sharing?.status || DECISION_STATUS.GAP;
+  const retentionStatus = decision.storage_limitation?.status || DECISION_STATUS.GAP;
+  const rightsStatus = decision.user_rights?.status || DECISION_STATUS.GAP;
+
+  const hasDataCollection = noticeStatus !== DECISION_STATUS.GAP;
+  const hasPurposeLimitation = consentStatus === DECISION_STATUS.CLEAR;
+  const sharingDetected = sharingStatus !== DECISION_STATUS.CLEAR;
+  const retentionGap = retentionStatus !== DECISION_STATUS.CLEAR;
+  const rightsGap = rightsStatus !== DECISION_STATUS.CLEAR;
+
+  const sharingNote = decision.third_party_sharing?.reason || "No clear third-party sharing signal.";
+  const retentionNote = decision.storage_limitation?.reason || "Retention period is unclear.";
+  const rightsNote = decision.user_rights?.reason || "Deletion or withdrawal rights are unclear.";
 
   return [
     {
       icon: hasDataCollection ? "✓" : "✗",
-      tone: hasDataCollection ? "good" : "bad",
+      tone: noticeStatus === DECISION_STATUS.RISK ? "warn" : hasDataCollection ? "good" : "bad",
       label: "Data Collection",
       note: hasDataCollection ? `${formatArray(analysis?.data_types_collected)} collected.` : "Collected data not clearly stated.",
     },
     {
       icon: hasPurposeLimitation ? "✓" : "✗",
-      tone: hasPurposeLimitation ? "good" : "bad",
+      tone: consentStatus === DECISION_STATUS.RISK ? "warn" : hasPurposeLimitation ? "good" : "bad",
       label: "Purpose Limitation",
       note: hasPurposeLimitation ? `${formatArray(analysis?.collection_purposes)} listed.` : "Purpose for collection is unclear.",
     },
     {
-      icon: sharingDetected ? "⚠" : "✓",
-      tone: sharingDetected ? "warn" : "good",
+      icon: sharingStatus === DECISION_STATUS.CLEAR ? "✓" : sharingStatus === DECISION_STATUS.RISK ? "⚠" : "✗",
+      tone: sharingStatus === DECISION_STATUS.CLEAR ? "good" : sharingStatus === DECISION_STATUS.RISK ? "warn" : "bad",
       label: "Third-party sharing",
-      note: sharingDetected ? "Third-party sharing is mentioned." : "No clear third-party sharing signal.",
+      note: sharingNote,
     },
     {
       icon: retentionGap ? "✗" : "✓",
-      tone: retentionGap ? "bad" : "good",
+      tone: retentionStatus === DECISION_STATUS.RISK ? "warn" : retentionGap ? "bad" : "good",
       label: "Retention gaps",
-      note: retentionGap ? "Retention period is unclear." : "Retention period is specified.",
+      note: retentionGap ? retentionNote : "Retention period is specified.",
     },
     {
       icon: rightsGap ? "✗" : "✓",
       tone: rightsGap ? "bad" : "good",
       label: "User rights gaps",
-      note: rightsGap ? "Deletion or withdrawal rights are unclear." : `${formatArray(analysis?.user_rights)} described.`,
+      note: rightsGap ? rightsNote : `${formatArray(analysis?.user_rights)} described.`,
     },
   ];
 }
