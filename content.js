@@ -48,12 +48,12 @@ function runAgent() {
 
 function isPolicyPage() {
   const url = window.location.href.toLowerCase();
-  const urlMatch = url.includes("privacy") || url.includes("policy");
+  const urlMatch = url.includes("privacy") || url.includes("policy") || url.includes("terms");
   const headings = Array.from(document.querySelectorAll("h1, h2, h3")).map((el) => (el.innerText || "").toLowerCase());
-  const headingMatch = headings.some((heading) => heading.includes("privacy policy"));
-  const bodyText = (document.body?.innerText || "").toLowerCase();
+  const headingSignals = ["privacy policy", "data protection", "terms of service"];
+  const headingMatch = headings.some((heading) => headingSignals.some((signal) => heading.includes(signal)));
 
-  return urlMatch || headingMatch || bodyText.includes("privacy policy");
+  return urlMatch || headingMatch;
 }
 
 function isCookieBannerPresent() {
@@ -94,8 +94,20 @@ function startModeRecheckObserver() {
 }
 
 function renderPolicyMode() {
+  if (!isPolicyPage()) {
+    renderNoPolicyDetectedOverlay();
+    return;
+  }
+
   policySourceUrl = extractPolicyUrl(document.body) || window.location.href;
-  const analysis = createPolicyPageFallbackAnalysis(extractVisiblePolicyText() || (document.body?.innerText || ""), policySourceUrl);
+  const policyText = extractRelevantPolicyText();
+  const analysis = createPolicyPageFallbackAnalysis(policyText, policySourceUrl);
+
+  if (!analysis) {
+    renderNoPolicyDetectedOverlay();
+    return;
+  }
+
   renderUnifiedOverlay({
     mode: MODE.POLICY,
     analysis,
@@ -103,6 +115,52 @@ function renderPolicyMode() {
     risks: padWithFallbacks(mapRisks(analysis)),
     bannerContext: { cookieSettingsDetected: false, acceptAllDetected: false },
     isFallback: false,
+  });
+}
+
+function renderNoPolicyDetectedOverlay() {
+  overlayInjected = true;
+  const { shadow } = createShadowHost();
+
+  shadow.innerHTML = `
+    <style>${getBaseStyles()}</style>
+    <div class="consent-label">Policy Analysis</div>
+    <div class="card" id="dpdp-panel" role="dialog" aria-label="DPDP Privacy Analysis">
+      <div class="drag-handle" id="dpdp-drag-handle" aria-hidden="true"><span class="drag-grip">⋮⋮</span><span>Drag left/right</span></div>
+      <div class="header"><span class="logo">🛡️</span><span class="title">DPDP Privacy Agent</span></div>
+      <div class="fallback-notice">No privacy policy detected on this page.</div>
+      <div class="panel-section recommended-action-section" aria-label="Recommended action">
+        <div class="section-kicker">Section 1</div>
+        <div class="section-title">⚠ Recommended Action</div>
+        <div class="recommended-action-box">No privacy policy detected on this page.</div>
+      </div>
+      <div class="panel-section" aria-label="Policy analysis summary">
+        <div class="section-kicker">Section 2</div>
+        <div class="section-title">Policy Analysis</div>
+        <div class="risk-summary-body">No privacy policy detected on this page.</div>
+      </div>
+      <div class="panel-section" aria-label="Action controls">
+        <div class="section-kicker">Section 3</div>
+        <div class="section-title">CTA</div>
+        <div class="btn-row">
+          <button class="btn-details" id="dpdp-toggle" aria-expanded="false">View Full Analysis</button>
+        </div>
+      </div>
+      <div class="details-section" id="dpdp-details">
+        <div class="detail-note">No privacy policy content was found, so no classification was generated.</div>
+      </div>
+    </div>
+  `;
+
+  setupOverlayDrag(shadow.getElementById("dpdp-drag-handle"));
+
+  const detailsEl = shadow.getElementById("dpdp-details");
+  const toggleBtn = shadow.getElementById("dpdp-toggle");
+
+  toggleBtn.addEventListener("click", () => {
+    const isOpen = detailsEl.classList.toggle("open");
+    toggleBtn.textContent = isOpen ? "Hide Full Analysis" : "View Full Analysis";
+    toggleBtn.setAttribute("aria-expanded", String(isOpen));
   });
 }
 
@@ -238,16 +296,42 @@ function analyzeText(text) {
 }
 
 function createPolicyPageFallbackAnalysis(policyText, pageUrl) {
-  const text = String(policyText || "").toLowerCase();
+  const text = String(policyText || "").trim();
+  if (text.length < 100) return null;
+
+  const normalized = text.toLowerCase();
   const headings = Array.from(document.querySelectorAll("h1, h2, h3"))
     .map((el) => (el.innerText || "").toLowerCase())
     .join(" ");
-  const combined = `${text} ${headings} ${String(pageUrl || window.location.href).toLowerCase()}`;
+  const combined = `${normalized} ${headings} ${String(pageUrl || window.location.href).toLowerCase()}`;
   return analyzeText(combined);
 }
 
-function extractVisiblePolicyText() {
-  return (document.body?.innerText || "").slice(0, POLICY_MODE_MAX_CHARS).trim();
+function extractRelevantPolicyText() {
+  const selectors = [
+    "main",
+    "article",
+    "[class*='policy']",
+    "[id*='policy']",
+    "[class*='privacy']",
+    "[id*='privacy']",
+    "[class*='terms']",
+    "[id*='terms']",
+  ];
+  const chunks = [];
+  const seen = new Set();
+
+  for (const selector of selectors) {
+    for (const element of document.querySelectorAll(selector)) {
+      if (seen.has(element)) continue;
+      seen.add(element);
+
+      const text = (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
+      if (text.length >= 100) chunks.push(text);
+    }
+  }
+
+  return chunks.join("\n\n").slice(0, POLICY_MODE_MAX_CHARS).trim();
 }
 
 function extractBannerContext(bannerEl) {
